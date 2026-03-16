@@ -35,19 +35,19 @@ For example:
 ```bash
 cd ~/code && rm -rf msserviceprofiler_pr178 && git clone https://gitcode.com/Ascend/msserviceprofiler.git msserviceprofiler_pr178 2>&1
 ```
-2. get PR branch:
+2. get PR branch and detect target branch:
 ```bash
 cd ~/code/msserviceprofiler_pr178 && git fetch origin merge-requests/178/head:pr178 && git checkout pr178
 ```
-3. find merge-base and get diff:
+3. find merge-base and get diff (use one command to avoid variable scope issues):
 ```bash
-# Find the common ancestor between PR branch and target branch (e.g., develop, main, master)
-MERGE_BASE=$(git merge-base develop pr178)
-# Get diff only from the merge-base to PR branch
+# Detect target branch (master/main/develop) and get diff in one command
+cd ~/code/msserviceprofiler_pr178 && \
+TARGET_BRANCH=$(git branch -r --contains HEAD --list '*/master' '*/main' '*/develop' | head -1 | sed 's|origin/||' || echo 'master') && \
+MERGE_BASE=$(git merge-base origin/$TARGET_BRANCH pr178) && \
 git diff $MERGE_BASE..pr178
-# Or get commit log with patch
-git log --patch $MERGE_BASE..pr178
 ```
+4. If merge-base still fails, fallback to: `git log --oneline origin/master..pr178` to see commits, then `git diff pr178~N..pr178` for last N commits
 check code in the commit and get the diff 
 
 ### Step 3: Analyze the changes
@@ -68,7 +68,7 @@ Read the commit carefully. For each changed file, identify:
 For **every meaningful issue found**, output one comment block using this format:
 
 ```
-[review] [<检视类别>] <具体的检视意见>；修改建议：<一句话说明修改方向>，参考代码如下：
+【review】【<检视类别>】 <具体的检视意见>；修改建议：<一句话说明修改方向>，参考代码如下：
 ```<language>
 <具体的修改后代码实现>
 ```
@@ -102,7 +102,7 @@ Remove download tmp file.
 ```
 文件：tensor_cast/layers/parallel_linear.py
 
-[review] [性能] 第 87 行 `forward()` 方法在每次调用时都重新创建 `weight_scale` 张量，导致重复内存分配；修改建议：将 `weight_scale` 提升为模块属性在 `__init__` 中初始化一次，参考代码如下：
+【review】【性能】 第 87 行 `forward()` 方法在每次调用时都重新创建 `weight_scale` 张量，导致重复内存分配；修改建议：将 `weight_scale` 提升为模块属性在 `__init__` 中初始化一次，参考代码如下：
 ```python
 # __init__ 中初始化
 self.weight_scale = torch.ones(self.out_features, dtype=torch.float32)
@@ -111,7 +111,7 @@ self.weight_scale = torch.ones(self.out_features, dtype=torch.float32)
 output = torch.matmul(input, self.weight.T) * self.weight_scale
 ```
 
-[review] [错误处理] 第 123 行 `load_checkpoint()` 未处理文件不存在的异常，直接调用 `torch.load()` 会抛出未捕获的 `FileNotFoundError`；修改建议：添加文件存在性检查或捕获异常并给出清晰提示，参考代码如下：
+【review】【错误处理】 第 123 行 `load_checkpoint()` 未处理文件不存在的异常，直接调用 `torch.load()` 会抛出未捕获的 `FileNotFoundError`；修改建议：添加文件存在性检查或捕获异常并给出清晰提示，参考代码如下：
 ```python
 import os
 
@@ -121,7 +121,7 @@ def load_checkpoint(self, path: str):
     return torch.load(path, map_location="cpu")
 ```
 
-[review] [规范] 第 15 行导入了 `math` 模块但整个文件中未使用；修改建议：删除未使用的导入，参考代码如下：
+【review】【规范】 第 15 行导入了 `math` 模块但整个文件中未使用；修改建议：删除未使用的导入，参考代码如下：
 ```python
 # 删除以下行
 import math
