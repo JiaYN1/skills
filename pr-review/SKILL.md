@@ -43,8 +43,7 @@ cd ~/code/msserviceprofiler_pr178 && git fetch origin merge-requests/178/head:pr
 ```bash
 # Detect target branch (master/main/develop) and get diff in one command
 cd ~/code/msserviceprofiler_pr178 && \
-TARGET_BRANCH=$(git branch -r --contains HEAD --list '*/master' '*/main' '*/develop' | head -1 | sed 's|origin/||' || echo 'master') && \
-MERGE_BASE=$(git merge-base origin/$TARGET_BRANCH pr178) && \
+MERGE_BASE=$(git merge-base origin/develop pr178) && \
 git diff $MERGE_BASE..pr178
 ```
 4. If merge-base still fails, fallback to: `git log --oneline origin/master..pr178` to see commits, then `git diff pr178~N..pr178` for last N commits
