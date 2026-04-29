@@ -1,0 +1,19 @@
+services:
+  pr-monitor:
+    build: .
+    container_name: gitcode-pr-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /app/data
+      REPOS_CONFIG_PATH: /app/config/repos.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config/repos.json:/app/config/repos.json:ro
+      - pr-monitor-data:/app/data
+
+volumes:
+  pr-monitor-data:
