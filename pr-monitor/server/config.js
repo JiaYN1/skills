@@ -64,6 +64,10 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
   return {
     port: parsePositiveInteger(env.PORT, 3000),
     staleDays: parsePositiveInteger(env.STALE_DAYS, 5),
+    issueThresholds: {
+      bugDays: parsePositiveInteger(env.BUG_ISSUE_STALE_DAYS, 5),
+      featureDays: parsePositiveInteger(env.FEATURE_ISSUE_STALE_DAYS, 30)
+    },
     timezone,
     dataDir,
     dbPath: env.DB_PATH || path.join(dataDir, 'pr-monitor.sqlite'),

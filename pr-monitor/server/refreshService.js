@@ -1,4 +1,5 @@
 import { normalizePull } from './pullMapper.js';
+import { normalizeIssue } from './issueMapper.js';
 import { getRepoKey } from './db.js';
 
 export class RefreshAlreadyRunningError extends Error {
@@ -17,18 +18,26 @@ export function createRefreshService({ db, client, repos, clock = () => new Date
 
   async function refreshRepo(repo, refreshedAt) {
     const pulls = await client.listOpenPulls(repo);
-    const rows = [];
+    const pullRows = [];
 
     for (const pull of pulls) {
       const number = Number(pull?.number ?? pull?.iid ?? pull?.id);
       const commits = await client.listPullCommits(repo, number);
-      rows.push(normalizePull(repo, pull, commits, refreshedAt));
+      pullRows.push(normalizePull(repo, pull, commits, refreshedAt));
     }
 
-    db.replaceRepoPulls(repo, rows, refreshedAt);
+    db.replaceRepoPulls(repo, pullRows, refreshedAt);
+
+    const issues = await client.listOpenIssues(repo);
+    const issueRows = issues.map((issue) => normalizeIssue(repo, issue, refreshedAt));
+
+    db.replaceRepoIssues(repo, issueRows, refreshedAt);
     db.setRepoStatus(repo, 'success', null, refreshedAt);
 
-    return rows.length;
+    return {
+      pullCount: pullRows.length,
+      issueCount: issueRows.length
+    };
   }
 
   async function runRefresh() {
@@ -50,8 +59,8 @@ export function createRefreshService({ db, client, repos, clock = () => new Date
       const refreshedAt = clock().toISOString();
 
       try {
-        const count = await refreshRepo(repo, refreshedAt);
-        results.push({ repoKey, count });
+        const counts = await refreshRepo(repo, refreshedAt);
+        results.push({ repoKey, ...counts });
       } catch (error) {
         const message = errorMessage(error);
         failures.push({ repoKey, message });

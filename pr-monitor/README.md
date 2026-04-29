@@ -1,6 +1,9 @@
-# GitCode PR Monitor
+# GitCode PR & Issue Monitor
 
-Docker Compose 可部署的 GitCode open PR 监控应用。后端每天 `Asia/Shanghai` 06:00 自动刷新，也可以在页面手动刷新；前端默认展示所有 open PR，并支持筛选严格大于 `STALE_DAYS` 的 PR。
+Docker Compose 可部署的 GitCode open PR / issue 监控应用。后端每天 `Asia/Shanghai` 06:00 自动刷新，也可以在页面手动刷新；前端支持在 PR 和 issue 视图间切换：
+
+- PR 视图支持筛选严格大于 `STALE_DAYS` 的 open PR。
+- Issue 视图支持筛选严格大于 `BUG_ISSUE_STALE_DAYS` 的 bug issue，以及严格大于 `FEATURE_ISSUE_STALE_DAYS` 的 feature issue。
 
 ## 配置
 
@@ -15,6 +18,8 @@ cp .env.example .env
 ```bash
 GITCODE_TOKEN=your-token
 STALE_DAYS=5
+BUG_ISSUE_STALE_DAYS=5
+FEATURE_ISSUE_STALE_DAYS=30
 TZ=Asia/Shanghai
 PORT=3000
 ```
@@ -66,5 +71,6 @@ scripts/deploy.sh user@server /opt/gitcode-pr-monitor
 ## API
 
 - `GET /api/pulls`: 返回缓存的 open PR 列表。
+- `GET /api/issues`: 返回缓存的 open issue 列表。
 - `GET /api/status`: 返回刷新状态、最近刷新时间、仓库刷新结果和阈值配置。
 - `POST /api/refresh`: 触发一次手动刷新；如果已有刷新在运行，返回 `409`。

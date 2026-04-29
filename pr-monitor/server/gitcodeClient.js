@@ -66,12 +66,20 @@ export class GitCodeClient {
   }
 
   async listOpenPulls(repo) {
+    return this.listOpenCollection(repo, 'pulls', 'pull list');
+  }
+
+  async listOpenIssues(repo) {
+    return this.listOpenCollection(repo, 'issues', 'issue list');
+  }
+
+  async listOpenCollection(repo, resourceName, resourceLabel) {
     const pulls = [];
     const perPage = 100;
 
     for (let page = 1; ; page += 1) {
       const batch = await this.request(
-        `/repos/${encodePathSegment(repo.owner)}/${encodePathSegment(repo.repo)}/pulls`,
+        `/repos/${encodePathSegment(repo.owner)}/${encodePathSegment(repo.repo)}/${resourceName}`,
         {
           state: 'open',
           page,
@@ -80,7 +88,7 @@ export class GitCodeClient {
       );
 
       if (!Array.isArray(batch)) {
-        throw new Error(`GitCode returned a non-array pull list for ${repo.owner}/${repo.repo}.`);
+        throw new Error(`GitCode returned a non-array ${resourceLabel} for ${repo.owner}/${repo.repo}.`);
       }
 
       pulls.push(...batch);

@@ -22,6 +22,7 @@ const app = await createServer({
   refreshService,
   repos: config.repos,
   staleDays: config.staleDays,
+  issueThresholds: config.issueThresholds,
   staticDir: resolveStaticDir(),
   logger: {
     level: process.env.LOG_LEVEL || 'info'
@@ -57,7 +58,7 @@ const address = await app.listen({
   host: '0.0.0.0'
 });
 
-app.log.info(`GitCode PR Monitor listening at ${address}`);
+app.log.info(`GitCode PR & Issue Monitor listening at ${address}`);
 
 async function shutdown() {
   await app.close();

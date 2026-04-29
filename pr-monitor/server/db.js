@@ -54,6 +54,25 @@ export function initDb(dbPath) {
       PRIMARY KEY (repo_owner, repo_name, number)
     );
 
+    CREATE TABLE IF NOT EXISTS issues (
+      repo_owner TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      repo_label TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      author TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      html_url TEXT NOT NULL,
+      issue_type TEXT NOT NULL,
+      labels_json TEXT NOT NULL,
+      is_bug INTEGER NOT NULL DEFAULT 0,
+      is_feature INTEGER NOT NULL DEFAULT 0,
+      refreshed_at TEXT NOT NULL,
+      PRIMARY KEY (repo_owner, repo_name, number)
+    );
+
     CREATE TABLE IF NOT EXISTS refresh_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       is_refreshing INTEGER NOT NULL DEFAULT 0,
@@ -105,6 +124,30 @@ export function initDb(dbPath) {
     DELETE FROM pulls WHERE repo_owner = ? AND repo_name = ?
   `);
 
+  const insertIssue = sqlite.prepare(`
+    INSERT INTO issues (
+      repo_owner,
+      repo_name,
+      repo_label,
+      number,
+      title,
+      state,
+      author,
+      created_at,
+      updated_at,
+      html_url,
+      issue_type,
+      labels_json,
+      is_bug,
+      is_feature,
+      refreshed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const deleteRepoIssues = sqlite.prepare(`
+    DELETE FROM issues WHERE repo_owner = ? AND repo_name = ?
+  `);
+
   const upsertRepoState = sqlite.prepare(`
     INSERT INTO repo_refresh_state (
       repo_key,
@@ -146,6 +189,32 @@ export function initDb(dbPath) {
       });
     },
 
+    replaceRepoIssues(repo, rows, refreshedAt) {
+      withTransaction(sqlite, () => {
+        deleteRepoIssues.run(repo.owner, repo.repo);
+
+        for (const row of rows) {
+          insertIssue.run(
+            repo.owner,
+            repo.repo,
+            repo.label,
+            row.number,
+            row.title,
+            row.state,
+            row.author,
+            row.createdAt,
+            row.updatedAt,
+            row.htmlUrl,
+            row.issueType,
+            JSON.stringify(row.labels),
+            row.isBug ? 1 : 0,
+            row.isFeature ? 1 : 0,
+            refreshedAt
+          );
+        }
+      });
+    },
+
     getPulls() {
       return sqlite.prepare(`
         SELECT
@@ -162,6 +231,29 @@ export function initDb(dbPath) {
           html_url,
           refreshed_at
         FROM pulls
+        ORDER BY created_at ASC, repo_label ASC, number ASC
+      `).all();
+    },
+
+    getIssues() {
+      return sqlite.prepare(`
+        SELECT
+          repo_owner,
+          repo_name,
+          repo_label,
+          number,
+          title,
+          state,
+          author,
+          created_at,
+          updated_at,
+          html_url,
+          issue_type,
+          labels_json,
+          is_bug,
+          is_feature,
+          refreshed_at
+        FROM issues
         ORDER BY created_at ASC, repo_label ASC, number ASC
       `).all();
     },

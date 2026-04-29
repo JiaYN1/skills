@@ -84,6 +84,34 @@ h1 {
   opacity: 0.7;
 }
 
+.view-switch {
+  display: inline-flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 4px;
+  border: 1px solid #d9e0e5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.view-switch-button,
+.segmented-control-button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #42515a;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.view-switch-button[data-active="true"],
+.segmented-control-button[data-active="true"] {
+  background: #1f6feb;
+  color: #fff;
+}
+
 .spin {
   animation: spin 900ms linear infinite;
 }
@@ -214,6 +242,12 @@ h1 {
   font-size: 14px;
 }
 
+.segmented-control {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .repo-state {
   display: flex;
   flex-wrap: wrap;
@@ -338,6 +372,12 @@ tr:last-child td {
   white-space: nowrap;
 }
 
+.badge-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .repo-name {
   font-weight: 700;
 }
@@ -355,6 +395,29 @@ tr:last-child td {
 .pr-number {
   margin-right: 8px;
   color: #60717c;
+}
+
+.tag-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #eef3f6;
+  color: #42515a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tag-badge-bug {
+  background: #ffe1de;
+  color: #b42318;
+}
+
+.tag-badge-feature {
+  background: #deedff;
+  color: #0f5fc6;
 }
 
 .age-pill {
@@ -401,6 +464,14 @@ tr:last-child td {
     flex-direction: column;
   }
 
+  .view-switch {
+    width: 100%;
+  }
+
+  .view-switch-button {
+    flex: 1 1 0;
+  }
+
   .refresh-button {
     width: 100%;
   }
@@ -413,6 +484,14 @@ tr:last-child td {
 @media (max-width: 520px) {
   h1 {
     font-size: 26px;
+  }
+
+  .segmented-control {
+    width: 100%;
+  }
+
+  .segmented-control-button {
+    width: 100%;
   }
 
   .status-strip {

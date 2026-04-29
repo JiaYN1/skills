@@ -33,6 +33,23 @@ describe('refresh service', () => {
             commit: { author: { date: '2026-04-28T01:00:00.000Z' } }
           }
         ];
+      },
+      async listOpenIssues(repo) {
+        if (repo.owner === 'bad') {
+          throw new Error('boom');
+        }
+
+        return [
+          {
+            number: 9,
+            title: '[Bug] Broken issue',
+            user: { login: 'eve' },
+            labels: [{ name: 'bug' }],
+            created_at: '2026-04-28T00:00:00.000Z',
+            updated_at: '2026-04-28T01:00:00.000Z',
+            html_url: 'https://gitcode.com/good/repo/issues/9'
+          }
+        ];
       }
     };
     const service = createRefreshService({ db, client, repos });
@@ -40,9 +57,10 @@ describe('refresh service', () => {
     const result = await service.refreshAll();
 
     expect(result.ok).toBe(false);
-    expect(result.results).toEqual([{ repoKey: 'good/repo', count: 1 }]);
+    expect(result.results).toEqual([{ repoKey: 'good/repo', pullCount: 1, issueCount: 1 }]);
     expect(result.failures).toEqual([{ repoKey: 'bad/repo', message: 'boom' }]);
     expect(db.getPulls()).toHaveLength(1);
+    expect(db.getIssues()).toHaveLength(1);
     expect(db.getRepoStatuses().map((repo) => repo.status).sort()).toEqual(['error', 'success']);
 
     db.close();
@@ -56,6 +74,9 @@ describe('refresh service', () => {
         resolvePulls = resolve;
       }),
       async listPullCommits() {
+        return [];
+      },
+      async listOpenIssues() {
         return [];
       }
     };
