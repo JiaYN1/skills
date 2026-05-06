@@ -19,8 +19,8 @@ Identify the platform and extract metadata:
 - **GitLab / self-hosted GitLab**: `https://{host}/{owner}/{repo}/-/merge_requests/{iid}`
   - API: `https://{host}/api/v4/projects/{url-encoded-path}/merge_requests/{iid}/changes`
 
-- **GitCode (git.code.tencent.com)**: `https://gitcode.com/{repo}/pull/{number}` or `/merge_requests/{number}`
-  - Try GitLab-compatible `/api/v4/` endpoints first.
+- **GitCode (gitcode.com)**: `https://gitcode.com/{owner}/{repo}/pull/{number}` or `/merge_requests/{number}`
+  - API: `https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}`.
 
 ### Step 2: Fetch the diff
 
