@@ -6,7 +6,7 @@
 
 - GitHub: `https://github.com/{owner}/{repo}/pull/{number}`
 - GitLab/self-hosted GitLab: `https://{host}/{group}/{repo}/-/merge_requests/{iid}`
-- GitCode: `https://gitcode.com/{repo}/pull/{number}` 或 `/merge_requests/{number}`，按 GitLab-compatible API 尝试
+- GitCode: `https://gitcode.com/{owner}/{repo}/pull/{number}`，使用 GitCode v5 API
 
 ## 本地运行
 
@@ -65,7 +65,7 @@ docker run --rm -p 19986:19986 \
 }
 ```
 
-GitHub 使用 Pull Request Review Comment；GitLab/GitCode 使用 Merge Request Discussion position。
+GitHub 使用 Pull Request Review Comment；GitLab 使用 Merge Request Discussion position；GitCode 使用 v5 Pull Request comments 的 `path` + `position` 行级评论。
 
 ## 注意
 

@@ -4,6 +4,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .diff_parser import ChangedFile
 from .providers import ProviderError, fetch_pull_request, parse_pr_url, resolve_token
 from .schemas import PublishItemResult, ReviewComment
 
@@ -37,7 +38,7 @@ async def publish_comments(pr_url: str, comments: list[ReviewComment], token: st
     if ref.platform == "github":
         results = await _publish_github_comments(pr_url, publishable, resolved_token)
     elif ref.platform == "gitcode":
-        raise PublishError("GitCode v5 行级评论发布接口尚未适配；当前只支持生成 review 结果。")
+        results = await _publish_gitcode_comments(pr_url, publishable, resolved_token)
     else:
         results = await _publish_gitlab_comments(pr_url, publishable, resolved_token)
 
@@ -92,6 +93,82 @@ async def _publish_github_comments(pr_url: str, comments: list[ReviewComment], t
         )
         for comment in comments
     ]
+
+
+async def _publish_gitcode_comments(pr_url: str, comments: list[ReviewComment], token: str) -> list[PublishItemResult]:
+    data = await fetch_pull_request(pr_url, token=token)
+    ref = data.ref
+    if not ref.owner or not ref.repo:
+        raise PublishError("GitCode PR 链接需要是 https://gitcode.com/{owner}/{repo}/pull/{number} 格式。")
+
+    owner = quote(ref.owner, safe="")
+    repo = quote(ref.repo, safe="")
+    number = quote(ref.number, safe="")
+    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/comments"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    params = {"access_token": token}
+    file_map = {file.new_path: file for file in data.files}
+
+    results: list[PublishItemResult] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        for comment in comments:
+            changed_file = file_map.get(comment.file_path)
+            if not changed_file:
+                results.append(
+                    PublishItemResult(
+                        id=comment.id,
+                        file_path=comment.file_path,
+                        line=comment.line,
+                        status="error",
+                        error="无法在当前 GitCode PR diff 中找到该文件，不能发布行级评论。",
+                    )
+                )
+                continue
+
+            position = _gitcode_diff_position(changed_file, comment.line)
+            if position is None:
+                results.append(
+                    PublishItemResult(
+                        id=comment.id,
+                        file_path=comment.file_path,
+                        line=comment.line,
+                        status="error",
+                        error="无法将该新行号映射到 GitCode diff position，不能发布行级评论。",
+                    )
+                )
+                continue
+
+            payload = {
+                "body": comment.body,
+                "path": comment.file_path,
+                "position": position,
+                "need_to_resolve": False,
+            }
+            response = await client.post(url, headers=headers, params=params, json=payload)
+            if response.status_code >= 400:
+                results.append(
+                    PublishItemResult(
+                        id=comment.id,
+                        file_path=comment.file_path,
+                        line=comment.line,
+                        status="error",
+                        error=_api_error(response, "GitCode 发布行级评论失败"),
+                    )
+                )
+                continue
+
+            body = _safe_json(response)
+            results.append(
+                PublishItemResult(
+                    id=comment.id,
+                    file_path=comment.file_path,
+                    line=comment.line,
+                    status="published",
+                    url=body.get("html_url") or body.get("url"),
+                )
+            )
+
+    return results
 
 
 async def _publish_gitlab_comments(pr_url: str, comments: list[ReviewComment], token: str) -> list[PublishItemResult]:
@@ -163,6 +240,31 @@ async def _latest_gitlab_version(mr_url: str, headers: dict[str, str], data) -> 
         raise PublishError("无法识别 GitLab/GitCode diff_refs，不能发布行级评论。")
 
     return {"base_sha": base_sha, "start_sha": start_sha, "head_sha": head_sha}
+
+
+def _gitcode_diff_position(file: ChangedFile, new_line: int) -> int | None:
+    position = 0
+    seen_hunk = False
+
+    for hunk in file.hunks:
+        if seen_hunk:
+            position += 1
+        seen_hunk = True
+
+        for line in hunk.lines:
+            position += 1
+            if line.new_line == new_line and line.kind in {"add", "context"}:
+                return position
+
+    return None
+
+
+def _safe_json(response: httpx.Response) -> dict:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _api_error(response: httpx.Response, prefix: str) -> str:
