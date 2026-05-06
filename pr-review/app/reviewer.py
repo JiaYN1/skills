@@ -240,8 +240,10 @@ def _format_review_body(
     code_example: str,
 ) -> str:
     return (
-        f"【review】【{category}】 `{file_path}` 第 {line} 行：{message}；"
-        f"修改建议：{suggestion}，参考代码如下：\n"
+        f"【review】【{category}】 `{file_path}` 第 {line} 行\n\n"
+        f"问题：{message}\n\n"
+        f"修改建议：{suggestion}\n\n"
+        "参考代码：\n"
         f"```{language}\n{code_example}\n```"
     )
 
