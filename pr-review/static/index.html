@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR Review Service</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <form id="reviewForm" class="panel form-panel">
+          <div class="brand-row">
+            <div>
+              <h1>PR Review</h1>
+              <p id="serviceState" class="muted">就绪</p>
+            </div>
+            <span class="status-pill" id="healthBadge">API</span>
+          </div>
+
+          <label class="field">
+            <span>PR 链接</span>
+            <input id="prUrl" name="prUrl" type="url" placeholder="https://github.com/org/repo/pull/123" required />
+          </label>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>平台 Token</span>
+              <input id="scmToken" name="scmToken" type="password" autocomplete="off" placeholder="可选" />
+            </label>
+            <label class="field">
+              <span>模型</span>
+              <input id="model" name="model" type="text" placeholder="默认 OPENAI_MODEL" />
+            </label>
+          </div>
+
+          <div class="actions">
+            <button id="reviewButton" class="primary" type="submit">生成 Review</button>
+            <button id="publishButton" class="secondary" type="button" disabled>发布选中意见</button>
+          </div>
+        </form>
+
+        <section class="panel summary-panel" aria-live="polite">
+          <div class="summary-grid">
+            <div>
+              <span class="metric-label">问题</span>
+              <strong id="totalCount">0</strong>
+            </div>
+            <div>
+              <span class="metric-label">严重</span>
+              <strong id="severeCount">0</strong>
+            </div>
+            <div>
+              <span class="metric-label">建议</span>
+              <strong id="suggestionCount">0</strong>
+            </div>
+            <div>
+              <span class="metric-label">规范</span>
+              <strong id="styleCount">0</strong>
+            </div>
+          </div>
+          <p id="summaryText" class="summary-text">尚未生成 review。</p>
+          <div id="warningList" class="warnings" hidden></div>
+        </section>
+      </section>
+
+      <section class="review-area">
+        <div class="list-toolbar">
+          <h2>Review 意见</h2>
+          <label class="check-row">
+            <input id="selectAll" type="checkbox" checked disabled />
+            <span>全选可发布意见</span>
+          </label>
+        </div>
+        <div id="commentsList" class="comments-list">
+          <div class="empty-state">暂无 review 意见。</div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
+
