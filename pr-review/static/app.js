@@ -246,6 +246,9 @@ async function parseResponse(response) {
   const payload = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
     const message = typeof payload === "string" ? payload : payload.detail || "请求失败";
+    if (response.status === 401) {
+      window.location.href = "/login";
+    }
     throw new Error(message);
   }
   return payload;
@@ -267,4 +270,3 @@ function severityClass(severity) {
   if (severity === "规范") return "style";
   return "suggestion";
 }
-

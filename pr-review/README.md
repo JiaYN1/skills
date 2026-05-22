@@ -21,6 +21,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 19986
 
 打开 `http://localhost:19986`。
 
+如果设置了 `ACCESS_PASSWORD`，首次打开会先进入密码页，输入正确密码后才能访问服务。
+
 ## Docker
 
 ```bash
@@ -37,6 +39,9 @@ docker run --rm -p 19986:19986 \
 - `OPENAI_MODEL`: 可选，默认 `gpt-4.1-mini`。
 - `OPENAI_BASE_URL`: 可选，默认 `https://api.openai.com/v1`，可指向兼容 Chat Completions 的服务。
 - `MAX_DIFF_CHARS`: 可选，默认 `120000`。
+- `ACCESS_PASSWORD`: 可选；设置后启用访问密码。
+- `ACCESS_SESSION_SECRET`: 可选；用于签名登录 cookie，未设置时会基于 `ACCESS_PASSWORD` 派生。
+- `ACCESS_SESSION_TTL_SECONDS`: 可选；登录态有效期，默认 `43200` 秒。
 - `GITHUB_TOKEN` / `GITLAB_TOKEN` / `GITCODE_TOKEN`: 可选，私有 PR/MR 或发布评论时需要。
 
 前端也可以临时输入平台 token；后端不会持久化 token。
@@ -71,4 +76,4 @@ GitHub 使用 Pull Request Review Comment；GitLab 使用 Merge Request Discussi
 
 - 行级发布依赖平台 API 对 diff position 的校验；如果 PR 被更新，旧 review 结果可能需要重新生成。
 - 二进制文件或没有文本 patch 的文件会被跳过。
-- 模型输出会被校验到实际 diff 的新行号；不在 diff 可评论行内的意见只展示，不自动发布。
+- 模型输出会被校准到实际 diff 中最近的可评论新行；仍无法定位到可评论行的意见只展示，不自动发布。

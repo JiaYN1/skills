@@ -48,6 +48,10 @@ class ReviewRequest(BaseModel):
     model: str | None = Field(default=None, description="OpenAI-compatible chat model. Defaults to OPENAI_MODEL.")
 
 
+class LoginRequest(BaseModel):
+    password: str = Field(min_length=1)
+
+
 class ReviewResponse(BaseModel):
     pr: PullRequestInfo
     comments: list[ReviewComment]
@@ -72,4 +76,3 @@ class PublishItemResult(BaseModel):
 
 class PublishResponse(BaseModel):
     results: list[PublishItemResult]
-

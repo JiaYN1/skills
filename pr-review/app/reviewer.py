@@ -77,11 +77,12 @@ SYSTEM_PROMPT = """你是一个严谨的 PR 代码审查助手。你只审查给
 1. 每条意见必须是真实、具体、可执行的问题。
 2. file_path 必须严格使用 diff 中出现的文件路径。
 3. line 必须选择该文件“可评论新行”中的行号；如果问题发生在删除行或整段逻辑上，挂到最近的相关新行。
-4. message 写中文，包含具体风险或行为后果，不要写泛泛建议。
-5. suggestion 写中文，说明具体修改方向。
-6. code_example 必须给出可直接参考的修正代码，不要只写 diff 或伪代码。
-7. 没有实际问题时返回空 comments。
-8. 只输出符合 JSON schema 的 JSON，不要输出 Markdown。"""
+4. line 只能填写 diff 里 `new:<数字>` 的数字，不能填写 hunk 序号、old 行号或相对偏移。
+5. message 写中文，包含具体风险或行为后果，不要写泛泛建议。
+6. suggestion 写中文，说明具体修改方向。
+7. code_example 默认可以写简短伪代码；只有当修正代码不超过 10 行时，才给出可直接参考的完整修正代码。
+8. 没有实际问题时返回空 comments。
+9. 只输出符合 JSON schema 的 JSON，不要输出 Markdown。"""
 
 
 async def generate_review(data: PullRequestData, model: str | None = None) -> tuple[list[ReviewComment], ReviewSummary, list[str]]:
@@ -164,7 +165,7 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
             continue
 
         try:
-            line = int(raw.get("line"))
+            requested_line = int(raw.get("line"))
         except (TypeError, ValueError):
             continue
 
@@ -185,6 +186,7 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
             continue
 
         changed_file = path_map[file_path]
+        line = _normalize_comment_line(requested_line, changed_file)
         publishable = line in changed_file.commentable_new_lines
         publish_warning = None
         if not publishable:
@@ -243,7 +245,6 @@ def _format_review_body(
         f"【review】【{category}】 `{file_path}` 第 {line} 行\n\n"
         f"问题：{message}\n\n"
         f"修改建议：{suggestion}\n\n"
-        "参考代码：\n"
         f"```{language}\n{code_example}\n```"
     )
 
@@ -273,6 +274,14 @@ def _resolve_file_path(raw_path: str, path_map: dict[str, ChangedFile]) -> str:
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _normalize_comment_line(line: int, changed_file: ChangedFile) -> int:
+    if line in changed_file.commentable_new_lines or not changed_file.commentable_new_lines:
+        return line
+
+    ordered_lines = sorted(changed_file.commentable_new_lines)
+    return min(ordered_lines, key=lambda candidate: (abs(candidate - line), candidate))
 
 
 def _strip_code_fence(value: str) -> str:

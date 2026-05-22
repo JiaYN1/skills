@@ -139,7 +139,7 @@ def render_annotated_diff(files: list[ChangedFile], max_chars: int) -> tuple[str
                 marker = {"add": "+", "delete": "-", "context": " "}.get(line.kind, " ")
                 old_value = line.old_line if line.old_line is not None else "-"
                 new_value = line.new_line if line.new_line is not None else "-"
-                parts.append(f"{marker} old:{old_value} new:{new_value} {line.content}")
+                parts.append(f"{marker} [old:{old_value}] [new:{new_value}] {line.content}")
 
     text = "\n".join(parts)
     if len(text) > max_chars:
@@ -186,4 +186,3 @@ def _strip_diff_path(path: str) -> str:
     if path.startswith("a/") or path.startswith("b/"):
         return path[2:]
     return path.strip('"')
-

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR Review Login</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top, rgba(39, 117, 255, 0.18), transparent 35%),
+          linear-gradient(160deg, #f5f7fb 0%, #eef2f8 45%, #e7edf6 100%);
+        color: #10213a;
+      }
+
+      .card {
+        width: min(420px, calc(100vw - 32px));
+        padding: 32px 28px;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 24px 80px rgba(16, 33, 58, 0.16);
+        backdrop-filter: blur(10px);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+      }
+
+      p {
+        margin: 0 0 24px;
+        line-height: 1.5;
+        color: #50627d;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 10px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      input {
+        width: 100%;
+        padding: 14px 16px;
+        border: 1px solid #cfd8e6;
+        border-radius: 14px;
+        font-size: 16px;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 16px;
+        padding: 14px 16px;
+        border: 0;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #1f6fff 0%, #0f56d9 100%);
+        color: #fff;
+        font-size: 16px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .error {
+        min-height: 24px;
+        margin-top: 14px;
+        color: #c3261a;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>访问验证</h1>
+      <p>请输入访问密码后再进入 PR Review 服务。</p>
+      <form id="loginForm">
+        <label for="password">访问密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <button type="submit">进入服务</button>
+        <div id="error" class="error" aria-live="polite"></div>
+      </form>
+    </main>
+    <script type="module">
+      const form = document.querySelector("#loginForm");
+      const passwordInput = document.querySelector("#password");
+      const error = document.querySelector("#error");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        error.textContent = "";
+
+        const response = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: passwordInput.value }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          error.textContent = payload.detail || "登录失败";
+          passwordInput.select();
+          return;
+        }
+
+        window.location.href = "/";
+      });
+    </script>
+  </body>
+</html>
