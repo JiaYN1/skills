@@ -7,19 +7,26 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
-from dataclasses import dataclass
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, replace
 from email import policy
 from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import parse_qs, urlparse
 
 
-REVIEW_PREFIX = "【review】"
+REVIEW_MARKER = "review"
 DEFAULT_LIMIT = 75
+DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+AI_BATCH_SIZE = 20
 OUTPUT_COLUMNS = ["检视详情", "创建时间", "检视者", "质量等级", "检视类型"]
+GRADE_RANK = {"d": 4, "c": 3, "b": 2, "a": 1}
 
 ALIASES = {
     "content": [
@@ -253,6 +260,14 @@ class ReviewResult:
         }
 
 
+@dataclass(frozen=True)
+class AIConfig:
+    api_key: str
+    base_url: str
+    model: str
+    timeout: int = 90
+
+
 def normalize_name(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", value.strip().lower())
 
@@ -261,6 +276,10 @@ def clean_cell(value: object) -> str:
     if value is None:
         return ""
     return str(value).lstrip("\ufeff").strip()
+
+
+def is_review_content(content: str) -> bool:
+    return REVIEW_MARKER in content.lower()
 
 
 def contains_any(text: str, terms: Iterable[str]) -> bool:
@@ -282,7 +301,13 @@ def decode_csv(data: bytes) -> str:
 
 def load_csv(data: bytes) -> tuple[list[str], list[dict[str, str]]]:
     text = decode_csv(data)
-    reader = csv.DictReader(io.StringIO(text))
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+    except csv.Error:
+        first_line = text.splitlines()[0] if text.splitlines() else ""
+        dialect = csv.excel_tab if "\t" in first_line else csv.excel
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     if not reader.fieldnames:
         raise ValueError("CSV must contain a header row.")
     fieldnames = [field for field in reader.fieldnames if field]
@@ -311,7 +336,7 @@ def pick_column(
         valid_count = sum(
             1
             for row in rows
-            if clean_cell(row.get(field, "")).startswith(REVIEW_PREFIX)
+            if is_review_content(clean_cell(row.get(field, "")))
         )
         scored_fields.append((valid_count, field))
 
@@ -431,10 +456,167 @@ def analyze_comment(
     )
 
 
+def review_text_length(result: ReviewResult) -> int:
+    return len(strip_leading_tags(result.content))
+
+
+def normalize_grade(value: object) -> str:
+    grade = str(value or "").strip().lower()
+    if grade.startswith("grade "):
+        grade = grade.replace("grade ", "", 1).strip()
+    return grade if grade in GRADE_RANK else ""
+
+
+def normalize_ai_type(value: object, content: str) -> str:
+    review_type = str(value or "").strip()
+    if not review_type:
+        return classify_type(content, strip_leading_tags(content))
+    return review_type[:40]
+
+
+def normalize_base_url(base_url: str) -> str:
+    value = base_url.strip().rstrip("/")
+    if not value:
+        raise ValueError("base_url is required when AI scoring is enabled.")
+    if value.endswith("/chat/completions"):
+        return value
+    return value + "/chat/completions"
+
+
+def build_ai_prompt(batch: list[ReviewResult]) -> list[dict[str, str]]:
+    reviews = [
+        {
+            "index": result.index,
+            "content": result.content,
+        }
+        for result in batch
+    ]
+    system_prompt = (
+        "You classify code review comment quality. "
+        "Use exactly one grade: a, b, c, or d. "
+        "Grade a: only a question or pure restatement of a coding standard. "
+        "Grade b: identifies the issue and says what to do. "
+        "Grade c: explains design thinking or reasoning. "
+        "Grade d: includes c-level reasoning plus why/how to improve, concrete plan, or examples. "
+        "Also assign a short Chinese review type such as 安全, 性能, 设计, 可靠性, 测试, 规范, or 综合. "
+        "Return only valid JSON."
+    )
+    user_prompt = (
+        "Score these review comments and return this exact JSON shape: "
+        '{"results":[{"index":0,"grade":"d","type":"设计"}]}\n'
+        + json.dumps({"reviews": reviews}, ensure_ascii=False)
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def call_chat_completion(config: AIConfig, messages: list[dict[str, str]]) -> str:
+    payload = {
+        "model": config.model,
+        "messages": messages,
+        "temperature": 0,
+    }
+    request = urllib.request.Request(
+        normalize_base_url(config.base_url),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=config.timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")[:500]
+        raise ValueError(f"AI scoring request failed with HTTP {exc.code}: {error_body}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"AI scoring request failed: {exc.reason}") from exc
+
+    data = json.loads(raw.decode("utf-8"))
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError("AI scoring response did not contain choices[0].message.content.") from exc
+
+
+def extract_json_payload(text: str) -> Any:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        starts = [pos for pos in (cleaned.find("{"), cleaned.find("[")) if pos >= 0]
+        ends = [pos for pos in (cleaned.rfind("}"), cleaned.rfind("]")) if pos >= 0]
+        if not starts or not ends:
+            raise ValueError("AI scoring response was not valid JSON.")
+        return json.loads(cleaned[min(starts) : max(ends) + 1])
+
+
+def parse_ai_scores(text: str) -> dict[int, tuple[str, str]]:
+    payload = extract_json_payload(text)
+    if isinstance(payload, dict):
+        items = payload.get("results", payload.get("reviews", []))
+    else:
+        items = payload
+    if not isinstance(items, list):
+        raise ValueError("AI scoring JSON must include a results array.")
+
+    scores: dict[int, tuple[str, str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        grade = normalize_grade(item.get("grade"))
+        if not grade:
+            continue
+        review_type = str(item.get("type") or item.get("review_type") or "").strip()
+        scores[index] = (grade, review_type)
+    return scores
+
+
+def score_reviews_with_ai(
+    results: list[ReviewResult],
+    config: AIConfig,
+) -> list[ReviewResult]:
+    if not config.api_key.strip():
+        raise ValueError("open_ai_key is required when AI scoring is enabled.")
+
+    scored: dict[int, tuple[str, str]] = {}
+    for offset in range(0, len(results), AI_BATCH_SIZE):
+        batch = results[offset : offset + AI_BATCH_SIZE]
+        response_text = call_chat_completion(config, build_ai_prompt(batch))
+        scored.update(parse_ai_scores(response_text))
+
+    missing = [result.index for result in results if result.index not in scored]
+    if missing:
+        preview = ", ".join(str(index) for index in missing[:10])
+        raise ValueError(f"AI scoring response missed review index: {preview}")
+
+    return [
+        replace(
+            result,
+            grade=scored[result.index][0],
+            review_type=normalize_ai_type(scored[result.index][1], result.content),
+        )
+        for result in results
+    ]
+
+
 def select_reviews(
     data: bytes,
     limit: int = DEFAULT_LIMIT,
     include_lower: bool = False,
+    ai_config: AIConfig | None = None,
 ) -> tuple[bytes, dict[str, object], list[ReviewResult]]:
     fieldnames, rows = load_csv(data)
     content_column = pick_column(fieldnames, rows, "content")
@@ -448,7 +630,7 @@ def select_reviews(
 
     for index, row in enumerate(rows):
         content = clean_cell(row.get(content_column, ""))
-        if not content.startswith(REVIEW_PREFIX):
+        if not is_review_content(content):
             continue
         valid_count += 1
         dedupe_key = re.sub(r"\s+", " ", content)
@@ -465,14 +647,15 @@ def select_reviews(
             )
         )
 
-    candidates = analyzed if include_lower else [
-        result for result in analyzed if result.grade in {"d", "c"}
-    ]
-    grade_rank = {"d": 4, "c": 3, "b": 2, "a": 1}
+    if ai_config and analyzed:
+        analyzed = score_reviews_with_ai(analyzed, ai_config)
+
+    candidates = analyzed
     selected = sorted(
         candidates,
         key=lambda result: (
-            grade_rank[result.grade],
+            GRADE_RANK[result.grade],
+            review_text_length(result),
             result.score,
             -result.index,
         ),
@@ -496,6 +679,9 @@ def select_reviews(
         "reviewer_column": reviewer_column,
         "limit": limit,
         "include_lower": include_lower,
+        "scoring_mode": "ai" if ai_config else "heuristic",
+        "candidate_filter": "all",
+        "model": ai_config.model if ai_config else "",
     }
     return output.getvalue().encode("utf-8-sig"), metadata, selected
 
@@ -518,6 +704,35 @@ def parse_limit(value: object) -> int:
     if limit < 1 or limit > 500:
         raise ValueError("limit must be between 1 and 500.")
     return limit
+
+
+def get_field(fields: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = fields.get(name)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def build_ai_config(fields: dict[str, str]) -> AIConfig | None:
+    use_ai_score = parse_bool(
+        get_field(fields, "use_ai_score", "ai_score", "use_ai")
+    )
+    if not use_ai_score:
+        return None
+
+    api_key = get_field(fields, "open_ai_key", "openai_key", "api_key") or os.getenv(
+        "OPENAI_API_KEY", ""
+    )
+    base_url = get_field(fields, "base_url", "openai_base_url") or os.getenv(
+        "OPENAI_BASE_URL", DEFAULT_BASE_URL
+    )
+    model = get_field(fields, "model", "openai_model") or os.getenv(
+        "OPENAI_MODEL", DEFAULT_MODEL
+    )
+    if not api_key:
+        raise ValueError("open_ai_key is required when AI scoring is enabled.")
+    return AIConfig(api_key=api_key, base_url=base_url, model=model)
 
 
 def parse_multipart(content_type: str, body: bytes) -> tuple[bytes, dict[str, str]]:
@@ -557,39 +772,209 @@ def build_html() -> bytes:
   <style>
     :root { color-scheme: light; font-family: Arial, "Microsoft YaHei", sans-serif; }
     body { margin: 0; background: #f4f6f8; color: #17202a; }
-    main { max-width: 760px; margin: 56px auto; padding: 0 24px; }
+    main { max-width: 1100px; margin: 40px auto; padding: 0 24px; }
     h1 { font-size: 28px; margin: 0 0 24px; }
     form { background: #fff; border: 1px solid #d9e0e7; border-radius: 8px; padding: 24px; display: grid; gap: 18px; }
     label { display: grid; gap: 8px; font-size: 14px; font-weight: 700; }
-    input[type="file"], input[type="number"] { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #b9c4cf; border-radius: 6px; font-size: 14px; background: #fff; }
+    input[type="file"], input[type="number"], input[type="password"], input[type="url"], input[type="text"] { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #b9c4cf; border-radius: 6px; font-size: 14px; background: #fff; }
     .inline { display: flex; gap: 10px; align-items: center; font-weight: 400; }
     .inline input { width: 16px; height: 16px; }
+    .ai-fields { display: grid; gap: 14px; padding: 16px; border: 1px solid #d9e0e7; border-radius: 8px; background: #f8fafc; }
+    .ai-fields[hidden] { display: none; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
     button { width: fit-content; border: 0; border-radius: 6px; padding: 10px 16px; background: #1f6feb; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #2f3a45; }
     button:hover { background: #195bc2; }
+    button.secondary:hover { background: #222b33; }
+    button:disabled { background: #a8b3bf; cursor: not-allowed; }
     code { background: #e9eef3; padding: 2px 5px; border-radius: 4px; }
     .api { margin-top: 16px; color: #46515c; font-size: 13px; }
+    .status { min-height: 20px; color: #46515c; font-size: 14px; }
+    .status.error { color: #b42318; }
+    .preview { margin-top: 24px; background: #fff; border: 1px solid #d9e0e7; border-radius: 8px; overflow: hidden; }
+    .preview[hidden] { display: none; }
+    .preview-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 16px 18px; border-bottom: 1px solid #d9e0e7; }
+    .preview-header h2 { margin: 0; font-size: 18px; }
+    .summary { color: #46515c; font-size: 13px; }
+    .table-wrap { overflow: auto; max-height: 560px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #e5ebf1; padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; background: #f8fafc; z-index: 1; font-weight: 700; }
+    td.content { min-width: 420px; white-space: pre-wrap; line-height: 1.5; }
+    td.nowrap { white-space: nowrap; }
   </style>
 </head>
 <body>
   <main>
     <h1>Code Review Top Selector</h1>
-    <form method="post" action="/api/select" enctype="multipart/form-data">
+    <form id="selector-form" method="post" action="/api/select" enctype="multipart/form-data" onsubmit="return false">
       <label>
         CSV 文件
-        <input type="file" name="file" accept=".csv,text/csv" required>
+        <input type="file" name="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" required>
       </label>
       <label>
         输出 Top N
         <input type="number" name="limit" value="75" min="1" max="500" step="1">
       </label>
       <label class="inline">
-        <input type="checkbox" name="include_lower" value="true">
-        包含 a/b 等级
+        <input type="checkbox" id="use-ai-score" name="use_ai_score" value="true">
+        使用 AI 评分
       </label>
-      <button type="submit">生成 CSV</button>
+      <div class="ai-fields" id="ai-fields" hidden>
+        <label>
+          OpenAI Key
+          <input type="password" id="open-ai-key" name="open_ai_key" autocomplete="off">
+        </label>
+        <label>
+          Base URL
+          <input type="url" name="base_url" value="https://api.openai.com/v1">
+        </label>
+        <label>
+          模型
+          <input type="text" name="model" value="gpt-4o-mini">
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="preview-button">预览结果</button>
+        <button type="button" id="download-button" class="secondary" disabled>下载 CSV</button>
+        <span class="status" id="status"></span>
+      </div>
     </form>
-    <p class="api">API: <code>POST /api/select</code>, form-data 字段名 <code>file</code>，可传 <code>limit</code> 控制输出 Top N。</p>
+    <p class="api">API: <code>POST /api/select</code>, form-data 字段名 <code>file</code>，可传 <code>limit</code>、<code>use_ai_score</code>、<code>open_ai_key</code>、<code>base_url</code>、<code>model</code>。</p>
+    <section class="preview" id="preview" hidden>
+      <div class="preview-header">
+        <h2>结果预览</h2>
+        <div class="summary" id="summary"></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>序号</th>
+              <th>质量等级</th>
+              <th>检视类型</th>
+              <th>检视者</th>
+              <th>创建时间</th>
+              <th>检视详情</th>
+            </tr>
+          </thead>
+          <tbody id="preview-body"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
+  <script>
+    const outputColumns = ["检视详情", "创建时间", "检视者", "质量等级", "检视类型"];
+    const useAi = document.getElementById("use-ai-score");
+    const aiFields = document.getElementById("ai-fields");
+    const keyInput = document.getElementById("open-ai-key");
+    const form = document.getElementById("selector-form");
+    const statusEl = document.getElementById("status");
+    const previewEl = document.getElementById("preview");
+    const summaryEl = document.getElementById("summary");
+    const previewBody = document.getElementById("preview-body");
+    const previewButton = document.getElementById("preview-button");
+    const downloadButton = document.getElementById("download-button");
+    let previewRows = [];
+
+    function syncAiFields() {
+      aiFields.hidden = !useAi.checked;
+      keyInput.required = useAi.checked;
+    }
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderPreview(rows, metadata) {
+      previewRows = rows;
+      previewBody.innerHTML = rows.map((row, index) => `
+        <tr>
+          <td class="nowrap">${index + 1}</td>
+          <td class="nowrap">${escapeHtml(row["质量等级"])}</td>
+          <td class="nowrap">${escapeHtml(row["检视类型"])}</td>
+          <td class="nowrap">${escapeHtml(row["检视者"])}</td>
+          <td class="nowrap">${escapeHtml(row["创建时间"])}</td>
+          <td class="content">${escapeHtml(row["检视详情"])}</td>
+        </tr>
+      `).join("");
+      summaryEl.textContent = `输入 ${metadata.input_rows} 行，含 review ${metadata.valid_rows} 行，去重 ${metadata.duplicate_rows} 行，输出 ${metadata.selected_rows} 行`;
+      previewEl.hidden = false;
+      downloadButton.disabled = rows.length === 0;
+    }
+
+    function escapeCsv(value) {
+      const text = String(value == null ? "" : value);
+      return /[",\\r\\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    }
+
+    function downloadCsv() {
+      if (!previewRows.length) return;
+      const lines = [
+        outputColumns.map(escapeCsv).join(","),
+        ...previewRows.map(row => outputColumns.map(column => escapeCsv(row[column])).join(",")),
+      ];
+      const blob = new Blob(["\\ufeff" + lines.join("\\r\\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "top_reviews.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function markPreviewStale() {
+      if (!previewRows.length) return;
+      previewRows = [];
+      downloadButton.disabled = true;
+      setStatus("参数已变更，请重新预览");
+    }
+
+    async function previewResults() {
+      previewRows = [];
+      downloadButton.disabled = true;
+      previewButton.disabled = true;
+      setStatus("处理中...");
+      try {
+        const formData = new FormData(form);
+        formData.set("format", "json");
+        const response = await fetch("/api/select", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+        renderPreview(data.rows || [], data.metadata || {});
+        setStatus("已生成预览");
+      } catch (error) {
+        previewEl.hidden = true;
+        setStatus(error.message || "处理失败", true);
+      } finally {
+        previewButton.disabled = false;
+      }
+    }
+
+    useAi.addEventListener("change", syncAiFields);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+    });
+    previewButton.addEventListener("click", previewResults);
+    form.addEventListener("input", markPreviewStale);
+    form.addEventListener("change", markPreviewStale);
+    downloadButton.addEventListener("click", downloadCsv);
+    syncAiFields();
+  </script>
 </body>
 </html>
 """.encode("utf-8")
@@ -628,11 +1013,13 @@ class ReviewServiceHandler(BaseHTTPRequestHandler):
             merged = {**query, **fields}
             limit = parse_limit(merged.get("limit"))
             include_lower = parse_bool(merged.get("include_lower"))
+            ai_config = build_ai_config(merged)
 
             csv_output, metadata, selected = select_reviews(
                 csv_content,
                 limit=limit,
                 include_lower=include_lower,
+                ai_config=ai_config,
             )
 
             if merged.get("format") == "json":
@@ -679,7 +1066,13 @@ class ReviewServiceHandler(BaseHTTPRequestHandler):
         if lowered.startswith("multipart/form-data"):
             return parse_multipart(content_type, body)
         if lowered.startswith("text/csv") or lowered.startswith("application/octet-stream"):
-            return body, {}
+            fields = {
+                "open_ai_key": self.headers.get("X-OpenAI-Key", ""),
+                "base_url": self.headers.get("X-OpenAI-Base-URL", ""),
+                "model": self.headers.get("X-OpenAI-Model", ""),
+                "use_ai_score": self.headers.get("X-Use-AI-Score", ""),
+            }
+            return body, {key: value for key, value in fields.items() if value}
         raise ValueError("Content-Type must be multipart/form-data or text/csv.")
 
     def send_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
