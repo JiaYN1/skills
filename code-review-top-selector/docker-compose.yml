@@ -1,0 +1,8 @@
+services:
+  code-review-top-selector:
+    build: .
+    image: code-review-top-selector:local
+    container_name: code-review-top-selector
+    ports:
+      - "18898:18898"
+    restart: unless-stopped

@@ -59,6 +59,28 @@ The AI will process **each review comment one by one**:
 4. Filter Top 75 high-quality comments
 5. Output a new CSV file with columns: Review Content, Review Time, Reviewer, Quality Grade, Review Type
 
+### Method: Docker HTTP Service
+
+Build and run the bundled service:
+
+```bash
+docker compose up -d --build
+```
+
+Endpoints:
+
+- `GET /`: CSV upload page
+- `GET /healthz`: health check
+- `POST /api/select`: CSV processing API
+
+API upload example:
+
+```bash
+curl -F "file=@reviews.csv" -F "limit=75" "http://127.0.0.1:18898/api/select" -o top_reviews.csv
+```
+
+The service is self-contained and uses deterministic grading/type heuristics. Set `limit` to output Top N rows. Send `format=json` to receive metadata and selected rows as JSON.
+
 ## Output Format
 
 Output CSV contains the following columns:
