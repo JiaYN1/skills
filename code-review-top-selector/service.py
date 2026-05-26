@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""HTTP service for selecting top code review comments from CSV files."""
+"""HTTP service for selecting top code review comments from CSV/XLSX files."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import io
 import json
 import os
+import posixpath
 import re
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass, replace
 from email import policy
 from email.parser import BytesParser
@@ -18,6 +21,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Iterable
 from urllib.parse import parse_qs, urlparse
+from xml.etree import ElementTree as ET
 
 
 REVIEW_MARKER = "review"
@@ -27,6 +31,42 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 AI_BATCH_SIZE = 20
 OUTPUT_COLUMNS = ["检视详情", "创建时间", "检视者", "质量等级", "检视类型"]
 GRADE_RANK = {"d": 4, "c": 3, "b": 2, "a": 1}
+SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+WORKBOOK_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+BUILTIN_DATE_NUM_FORMAT_IDS = {
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    45,
+    46,
+    47,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+}
 
 ALIASES = {
     "content": [
@@ -315,6 +355,305 @@ def load_csv(data: bytes) -> tuple[list[str], list[dict[str, str]]]:
     if not fieldnames:
         raise ValueError("CSV header row is empty.")
     return fieldnames, rows
+
+
+def is_xlsx_data(data: bytes) -> bool:
+    if not data.startswith(b"PK"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return False
+    return "xl/workbook.xml" in names and any(
+        name.startswith("xl/worksheets/") and name.endswith(".xml")
+        for name in names
+    )
+
+
+def parse_int(value: object, default: int = 0) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def resolve_xlsx_target(base_dir: str, target: str) -> str:
+    clean_target = target.split("#", 1)[0]
+    if clean_target.startswith("/"):
+        return clean_target.lstrip("/")
+    return posixpath.normpath(posixpath.join(base_dir, clean_target))
+
+
+def first_worksheet_path(archive: zipfile.ZipFile) -> str:
+    names = set(archive.namelist())
+    workbook_path = "xl/workbook.xml"
+    relationships_path = "xl/_rels/workbook.xml.rels"
+    if workbook_path not in names:
+        raise ValueError("XLSX must contain xl/workbook.xml.")
+
+    relationship_targets: dict[str, str] = {}
+    if relationships_path in names:
+        root = ET.fromstring(archive.read(relationships_path))
+        for relationship in root.findall(f"{{{PACKAGE_REL_NS}}}Relationship"):
+            rel_id = relationship.get("Id")
+            target = relationship.get("Target")
+            rel_type = relationship.get("Type", "")
+            target_mode = relationship.get("TargetMode", "")
+            if (
+                rel_id
+                and target
+                and target_mode.lower() != "external"
+                and rel_type.endswith("/worksheet")
+            ):
+                relationship_targets[rel_id] = resolve_xlsx_target("xl", target)
+
+    workbook = ET.fromstring(archive.read(workbook_path))
+    for sheet in workbook.findall(f".//{{{SPREADSHEET_NS}}}sheet"):
+        rel_id = sheet.get(f"{{{WORKBOOK_REL_NS}}}id")
+        target = relationship_targets.get(rel_id or "")
+        if target and target in names:
+            return target
+
+    for name in sorted(names):
+        if name.startswith("xl/worksheets/") and name.endswith(".xml"):
+            return name
+
+    raise ValueError("XLSX must contain at least one worksheet.")
+
+
+def workbook_uses_1904_dates(archive: zipfile.ZipFile) -> bool:
+    try:
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+    except KeyError:
+        return False
+    workbook_properties = workbook.find(f"{{{SPREADSHEET_NS}}}workbookPr")
+    if workbook_properties is None:
+        return False
+    return workbook_properties.get("date1904") in {"1", "true", "TRUE"}
+
+
+def read_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+
+    strings = []
+    for item in root.findall(f"{{{SPREADSHEET_NS}}}si"):
+        strings.append(
+            "".join(
+                text_node.text or ""
+                for text_node in item.iter(f"{{{SPREADSHEET_NS}}}t")
+            )
+        )
+    return strings
+
+
+def is_date_number_format(format_code: str) -> bool:
+    lowered = format_code.lower()
+    lowered = re.sub(r'"[^"]*"', "", lowered)
+    has_elapsed_time = bool(re.search(r"\[[hms]+\]", lowered))
+    lowered = re.sub(r"\[[^\]]+\]", "", lowered)
+    lowered = re.sub(r"\\.", "", lowered)
+    return has_elapsed_time or bool(
+        re.search(r"[ymdhs]|年|月|日|时|分|秒|上午|下午|am/pm", lowered)
+    )
+
+
+def read_date_style_indexes(archive: zipfile.ZipFile) -> set[int]:
+    try:
+        root = ET.fromstring(archive.read("xl/styles.xml"))
+    except KeyError:
+        return set()
+
+    custom_date_format_ids = set()
+    num_formats = root.find(f"{{{SPREADSHEET_NS}}}numFmts")
+    if num_formats is not None:
+        for num_format in num_formats.findall(f"{{{SPREADSHEET_NS}}}numFmt"):
+            num_format_id = parse_int(num_format.get("numFmtId"), -1)
+            format_code = num_format.get("formatCode", "")
+            if num_format_id >= 0 and is_date_number_format(format_code):
+                custom_date_format_ids.add(num_format_id)
+
+    date_style_indexes = set()
+    cell_formats = root.find(f"{{{SPREADSHEET_NS}}}cellXfs")
+    if cell_formats is None:
+        return date_style_indexes
+    for index, cell_format in enumerate(cell_formats.findall(f"{{{SPREADSHEET_NS}}}xf")):
+        num_format_id = parse_int(cell_format.get("numFmtId"), 0)
+        if (
+            num_format_id in BUILTIN_DATE_NUM_FORMAT_IDS
+            or num_format_id in custom_date_format_ids
+        ):
+            date_style_indexes.add(index)
+    return date_style_indexes
+
+
+def column_index_from_cell_ref(cell_ref: str) -> int:
+    match = re.match(r"([A-Za-z]+)", cell_ref or "")
+    if not match:
+        return 0
+    index = 0
+    for char in match.group(1).upper():
+        index = index * 26 + ord(char) - ord("A") + 1
+    return index
+
+
+def collect_xlsx_text(element: ET.Element) -> str:
+    return "".join(
+        text_node.text or ""
+        for text_node in element.iter(f"{{{SPREADSHEET_NS}}}t")
+    )
+
+
+def normalize_number_text(value: str) -> str:
+    text = value.strip()
+    if re.fullmatch(r"-?\d+\.0+", text):
+        return text.split(".", 1)[0]
+    return text
+
+
+def format_excel_date(value: str, date_1904: bool) -> str:
+    try:
+        serial = float(value)
+    except ValueError:
+        return value
+    if serial < 0:
+        return value
+
+    base = dt.datetime(1904, 1, 1) if date_1904 else dt.datetime(1899, 12, 30)
+    timestamp = base + dt.timedelta(seconds=round(serial * 86400))
+    if 0 <= serial < 1:
+        return timestamp.strftime("%H:%M:%S")
+    if timestamp.time() == dt.time(0, 0):
+        return timestamp.strftime("%Y-%m-%d")
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def read_xlsx_cell(
+    cell: ET.Element,
+    shared_strings: list[str],
+    date_style_indexes: set[int],
+    date_1904: bool,
+) -> str:
+    cell_type = cell.get("t", "")
+    value_node = cell.find(f"{{{SPREADSHEET_NS}}}v")
+    raw_value = value_node.text if value_node is not None and value_node.text else ""
+
+    if cell_type == "s":
+        shared_index = parse_int(raw_value, -1)
+        if 0 <= shared_index < len(shared_strings):
+            return shared_strings[shared_index]
+        return ""
+    if cell_type == "inlineStr":
+        return collect_xlsx_text(cell)
+    if cell_type == "b":
+        return "TRUE" if raw_value == "1" else "FALSE"
+    if cell_type in {"str", "e", "d"}:
+        return raw_value
+
+    if not raw_value:
+        return collect_xlsx_text(cell)
+
+    style_index = parse_int(cell.get("s"), -1)
+    if style_index in date_style_indexes:
+        return format_excel_date(raw_value, date_1904)
+    return normalize_number_text(raw_value)
+
+
+def read_worksheet_rows(
+    archive: zipfile.ZipFile,
+    sheet_path: str,
+    shared_strings: list[str],
+    date_style_indexes: set[int],
+    date_1904: bool,
+) -> list[list[str]]:
+    root = ET.fromstring(archive.read(sheet_path))
+    rows = []
+    for row_node in root.findall(f".//{{{SPREADSHEET_NS}}}sheetData/{{{SPREADSHEET_NS}}}row"):
+        row_values: dict[int, str] = {}
+        current_column = 0
+        for cell in row_node.findall(f"{{{SPREADSHEET_NS}}}c"):
+            column_index = column_index_from_cell_ref(cell.get("r", ""))
+            if column_index <= 0:
+                column_index = current_column + 1
+            row_values[column_index] = read_xlsx_cell(
+                cell,
+                shared_strings,
+                date_style_indexes,
+                date_1904,
+            )
+            current_column = column_index
+        if row_values:
+            rows.append(
+                [
+                    row_values.get(column_index, "")
+                    for column_index in range(1, max(row_values) + 1)
+                ]
+            )
+    return rows
+
+
+def xlsx_rows_to_dicts(rows: list[list[str]]) -> tuple[list[str], list[dict[str, str]]]:
+    populated_rows = [row for row in rows if any(clean_cell(cell) for cell in row)]
+    if not populated_rows:
+        raise ValueError("XLSX must contain a header row.")
+
+    header = [clean_cell(cell) for cell in populated_rows[0]]
+    fieldnames = []
+    column_indexes = []
+    seen_fieldnames: dict[str, int] = {}
+    for index, name in enumerate(header):
+        if not name:
+            continue
+        seen_fieldnames[name] = seen_fieldnames.get(name, 0) + 1
+        fieldname = name if seen_fieldnames[name] == 1 else f"{name}_{seen_fieldnames[name]}"
+        fieldnames.append(fieldname)
+        column_indexes.append(index)
+
+    if not fieldnames:
+        raise ValueError("XLSX header row is empty.")
+
+    table_rows = []
+    for row in populated_rows[1:]:
+        table_rows.append(
+            {
+                fieldname: clean_cell(row[column_index]) if column_index < len(row) else ""
+                for fieldname, column_index in zip(fieldnames, column_indexes)
+            }
+        )
+    return fieldnames, table_rows
+
+
+def load_xlsx(data: bytes) -> tuple[list[str], list[dict[str, str]]]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            sheet_path = first_worksheet_path(archive)
+            rows = read_worksheet_rows(
+                archive=archive,
+                sheet_path=sheet_path,
+                shared_strings=read_shared_strings(archive),
+                date_style_indexes=read_date_style_indexes(archive),
+                date_1904=workbook_uses_1904_dates(archive),
+            )
+    except zipfile.BadZipFile as exc:
+        raise ValueError("XLSX file is not a valid ZIP archive.") from exc
+    except ET.ParseError as exc:
+        raise ValueError("XLSX file contains invalid worksheet XML.") from exc
+    return xlsx_rows_to_dicts(rows)
+
+
+def load_table(data: bytes) -> tuple[str, list[str], list[dict[str, str]]]:
+    if data.startswith(b"\xd0\xcf\x11\xe0"):
+        raise ValueError(".xls files are not supported. Please save as .xlsx or CSV.")
+    if data.startswith(b"PK"):
+        if not is_xlsx_data(data):
+            raise ValueError("ZIP uploads must be valid .xlsx files.")
+        fieldnames, rows = load_xlsx(data)
+        return "xlsx", fieldnames, rows
+    fieldnames, rows = load_csv(data)
+    return "csv", fieldnames, rows
 
 
 def pick_column(
@@ -618,7 +957,7 @@ def select_reviews(
     include_lower: bool = False,
     ai_config: AIConfig | None = None,
 ) -> tuple[bytes, dict[str, object], list[ReviewResult]]:
-    fieldnames, rows = load_csv(data)
+    input_format, fieldnames, rows = load_table(data)
     content_column = pick_column(fieldnames, rows, "content")
     created_at_column = pick_column(fieldnames, rows, "created_at")
     reviewer_column = pick_column(fieldnames, rows, "reviewer")
@@ -677,6 +1016,7 @@ def select_reviews(
         "content_column": content_column,
         "created_at_column": created_at_column,
         "reviewer_column": reviewer_column,
+        "input_format": input_format,
         "limit": limit,
         "include_lower": include_lower,
         "scoring_mode": "ai" if ai_config else "heuristic",
@@ -809,8 +1149,8 @@ def build_html() -> bytes:
     <h1>Code Review Top Selector</h1>
     <form id="selector-form" method="post" action="/api/select" enctype="multipart/form-data" onsubmit="return false">
       <label>
-        CSV 文件
-        <input type="file" name="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" required>
+        CSV / XLSX 文件
+        <input type="file" name="file" accept=".csv,.tsv,.xlsx,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
       </label>
       <label>
         输出 Top N
@@ -1009,14 +1349,14 @@ class ReviewServiceHandler(BaseHTTPRequestHandler):
         try:
             query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
             body = self.read_request_body()
-            csv_content, fields = self.extract_csv_content(body)
+            table_content, fields = self.extract_table_content(body)
             merged = {**query, **fields}
             limit = parse_limit(merged.get("limit"))
             include_lower = parse_bool(merged.get("include_lower"))
             ai_config = build_ai_config(merged)
 
             csv_output, metadata, selected = select_reviews(
-                csv_content,
+                table_content,
                 limit=limit,
                 include_lower=include_lower,
                 ai_config=ai_config,
@@ -1060,12 +1400,18 @@ class ReviewServiceHandler(BaseHTTPRequestHandler):
             raise ValueError("request body exceeds upload limit.")
         return self.rfile.read(length)
 
-    def extract_csv_content(self, body: bytes) -> tuple[bytes, dict[str, str]]:
+    def extract_table_content(self, body: bytes) -> tuple[bytes, dict[str, str]]:
         content_type = self.headers.get("Content-Type", "")
         lowered = content_type.lower()
         if lowered.startswith("multipart/form-data"):
             return parse_multipart(content_type, body)
-        if lowered.startswith("text/csv") or lowered.startswith("application/octet-stream"):
+        raw_upload_types = (
+            "text/csv",
+            "text/tab-separated-values",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/octet-stream",
+        )
+        if lowered.startswith(raw_upload_types):
             fields = {
                 "open_ai_key": self.headers.get("X-OpenAI-Key", ""),
                 "base_url": self.headers.get("X-OpenAI-Base-URL", ""),
@@ -1073,7 +1419,7 @@ class ReviewServiceHandler(BaseHTTPRequestHandler):
                 "use_ai_score": self.headers.get("X-Use-AI-Score", ""),
             }
             return body, {key: value for key, value in fields.items() if value}
-        raise ValueError("Content-Type must be multipart/form-data or text/csv.")
+        raise ValueError("Content-Type must be multipart/form-data, text/csv, or XLSX.")
 
     def send_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

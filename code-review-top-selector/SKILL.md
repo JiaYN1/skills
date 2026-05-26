@@ -1,13 +1,13 @@
 ---
 name: code-review-top-selector
-description: Filter Top N high-quality code review comments from CSV files. Supports deterministic grading or optional OpenAI-compatible AI grading for each review comment's type and quality grade (a/b/c/d), then selects the highest-grade comments. Use when processing code review CSV files, filtering high-quality review comments, or generating review reports.
+description: Filter Top N high-quality code review comments from CSV, TSV, or XLSX files. Supports deterministic grading or optional OpenAI-compatible AI grading for each review comment's type and quality grade (a/b/c/d), then selects the highest-grade comments. Use when processing code review spreadsheet files, filtering high-quality review comments, or generating review reports.
 ---
 
 # Code Review Top Selector
 
 ## Overview
 
-This skill filters the Top N high-quality code review comments from a CSV file and outputs a new CSV file.
+This skill filters the Top N high-quality code review comments from a CSV, TSV, or XLSX file and outputs a new CSV file.
 
 ### Quality Grade Standards
 
@@ -45,11 +45,11 @@ This skill filters the Top N high-quality code review comments from a CSV file a
 
 ### Method: AI-Assisted Processing
 
-Tell the AI: "Please use the code-review-top-selector skill to process this CSV file"
+Tell the AI: "Please use the code-review-top-selector skill to process this CSV/XLSX file"
 
 The AI will process **each review comment one by one**:
 
-1. Read the CSV file
+1. Read the CSV/XLSX file
 2. **For each review comment:**
    - **Check validity**: Only process if the content contains `review`, skip others
    - **Deduplicate before scoring**: Track seen comments, skip duplicates
@@ -70,14 +70,20 @@ docker compose up -d --build
 
 Endpoints:
 
-- `GET /`: CSV upload page with result preview and CSV download
+- `GET /`: CSV/XLSX upload page with result preview and CSV download
 - `GET /healthz`: health check
-- `POST /api/select`: CSV processing API
+- `POST /api/select`: CSV/XLSX processing API
 
 API upload example:
 
 ```bash
 curl -F "file=@reviews.csv" -F "limit=75" "http://127.0.0.1:18898/api/select" -o top_reviews.csv
+```
+
+XLSX input is also supported. The service reads the first worksheet:
+
+```bash
+curl -F "file=@reviews.xlsx" -F "limit=75" "http://127.0.0.1:18898/api/select" -o top_reviews.csv
 ```
 
 The service uses deterministic grading/type heuristics by default. Set `use_ai_score=true` with `open_ai_key`, `base_url`, and optional `model` to grade comments through an OpenAI-compatible chat completions API. Selection uses all grades by `d > c > b > a`; same-grade comments are ordered by longer content first.
@@ -98,8 +104,8 @@ Set `limit` to output Top N rows. Send `format=json` to receive metadata and sel
 
 Output CSV contains the following columns:
 - **检视详情**: Original review comment
-- **创建时间**: Retrieved from original CSV
-- **检视者**: Retrieved from original CSV
+- **创建时间**: Retrieved from original CSV/XLSX
+- **检视者**: Retrieved from original CSV/XLSX
 - **质量等级**: a/b/c/d
 - **检视类型**: 安全/性能/设计，等。
 
@@ -109,5 +115,5 @@ Output CSV contains the following columns:
 2. **Deduplication**: Duplicate comments are removed before deterministic or AI scoring
 3. **Processing Approach**: AI analyzes each comment individually for accurate assessment
 4. **Encoding Format**: Defaults to UTF-8 encoding
-5. **Column Mapping**: If original CSV has different column names, AI will handle mapping automatically
+5. **Column Mapping**: If original CSV/XLSX has different column names, AI will handle mapping automatically
 6. **Quality Assessment**: AI assesses grades based on criteria, may have subjectivity
