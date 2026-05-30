@@ -1,0 +1,13 @@
+services:
+  bili-wechat-pusher:
+    build: .
+    image: bili-wechat-pusher:latest
+    container_name: bili-wechat-pusher
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - bili-wechat-data:/data
+
+volumes:
+  bili-wechat-data:
