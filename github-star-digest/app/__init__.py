@@ -1,0 +1,2 @@
+"""GitHub star digest service."""
+

@@ -1,0 +1,14 @@
+services:
+  github-star-digest:
+    build: .
+    image: github-star-digest:latest
+    container_name: github-star-digest
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - github-star-digest-data:/data
+
+volumes:
+  github-star-digest-data:
