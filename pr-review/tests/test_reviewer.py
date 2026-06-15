@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from app.diff_parser import parse_patch
+from app.diff_parser import parse_patch, render_annotated_diff
 from app.providers import PullRequestData, PullRequestRef
 from app.reviewer import _format_review_body, _normalize_comments, generate_review
 
@@ -76,6 +76,44 @@ class ReviewerTest(unittest.TestCase):
 
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0].line, 13)
+        self.assertTrue(comments[0].publishable)
+
+    def test_normalize_comments_uses_line_anchor_before_line_number(self):
+        changed_file = parse_patch(
+            """diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1000,3 +1000,4 @@
+ keep
+-old_call()
++new_call()
++extra_call()
+ done
+""",
+            "app.py",
+        )
+        render_annotated_diff([changed_file], max_chars=10000)
+        anchor = next(anchor for anchor, line in changed_file.line_anchors.items() if line == 1002)
+
+        comments = _normalize_comments(
+            [
+                {
+                    "file_path": "app.py",
+                    "line": 12,
+                    "line_anchor": anchor,
+                    "category": "逻辑",
+                    "severity": "建议",
+                    "message": "这里需要挂到新增调用的真实大行号。",
+                    "suggestion": "优先使用锚点映射回真实新文件行号。",
+                    "code_example": "extra_call()",
+                    "language": "python",
+                }
+            ],
+            [changed_file],
+        )
+
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0].line, 1002)
         self.assertTrue(comments[0].publishable)
 
 

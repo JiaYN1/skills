@@ -31,6 +31,7 @@ REVIEW_JSON_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "file_path": {"type": "string"},
                     "line": {"type": "integer"},
+                    "line_anchor": {"type": "string"},
                     "category": {"type": "string", "enum": sorted(CATEGORIES)},
                     "severity": {"type": "string", "enum": sorted(SEVERITIES)},
                     "message": {"type": "string"},
@@ -41,6 +42,7 @@ REVIEW_JSON_SCHEMA: dict[str, Any] = {
                 "required": [
                     "file_path",
                     "line",
+                    "line_anchor",
                     "category",
                     "severity",
                     "message",
@@ -76,8 +78,8 @@ SYSTEM_PROMPT = """你是一个严谨的 PR 代码审查助手。你只审查给
 规则：
 1. 每条意见必须是真实、具体、可执行的问题。
 2. file_path 必须严格使用 diff 中出现的文件路径。
-3. line 必须选择该文件“可评论新行”中的行号；如果问题发生在删除行或整段逻辑上，挂到最近的相关新行。
-4. line 只能填写 diff 里 `new:<数字>` 的数字，不能填写 hunk 序号、old 行号或相对偏移。
+3. 必须选择带 `[anchor:<值>]` 的可评论新行；如果问题发生在删除行或整段逻辑上，挂到最近的相关 anchor 行。
+4. line_anchor 必须原样复制该行的 anchor 值；line 必须填写同一行 `new:<数字>` 的数字，不能填写 hunk 序号、old 行号或相对偏移。
 5. message 写中文，包含具体风险或行为后果，不要写泛泛建议。
 6. suggestion 写中文，说明具体修改方向。
 7. code_example 默认可以写简短伪代码；只有当修正代码不超过 10 行时，才给出可直接参考的完整修正代码。
@@ -112,6 +114,8 @@ PR: {data.ref.web_url}
 平台: {data.ref.platform}
 仓库: {data.ref.project_path}
 标题: {data.title or ""}
+
+说明：diff 中只有带 `[anchor:<值>]` 的行可以发布行级评论。每条 comment 必须同时填写 `line_anchor` 和对应的 `line`。
 
 {annotated_diff}
 """
@@ -160,14 +164,18 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
         if not isinstance(raw, dict):
             continue
 
-        file_path = _resolve_file_path(str(raw.get("file_path", "")), path_map)
-        if not file_path:
-            continue
+        anchor_target = _resolve_line_anchor(_clean_text(raw.get("line_anchor")), files)
+        if anchor_target:
+            file_path, requested_line = anchor_target
+        else:
+            file_path = _resolve_file_path(str(raw.get("file_path", "")), path_map)
+            if not file_path:
+                continue
 
-        try:
-            requested_line = int(raw.get("line"))
-        except (TypeError, ValueError):
-            continue
+            try:
+                requested_line = int(raw.get("line"))
+            except (TypeError, ValueError):
+                continue
 
         category = str(raw.get("category", "可维护性"))
         if category not in CATEGORIES:
@@ -270,6 +278,19 @@ def _resolve_file_path(raw_path: str, path_map: dict[str, ChangedFile]) -> str:
         return raw_path
     matches = [path for path in path_map if path.endswith(raw_path) or raw_path.endswith(path)]
     return matches[0] if len(matches) == 1 else ""
+
+
+def _resolve_line_anchor(raw_anchor: str, files: list[ChangedFile]) -> tuple[str, int] | None:
+    if not raw_anchor:
+        return None
+
+    matches: list[tuple[str, int]] = []
+    for file in files:
+        line = file.line_anchors.get(raw_anchor)
+        if line is not None:
+            matches.append((file.new_path, line))
+
+    return matches[0] if len(matches) == 1 else None
 
 
 def _clean_text(value: Any) -> str:

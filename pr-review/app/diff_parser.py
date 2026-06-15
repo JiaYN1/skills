@@ -5,6 +5,8 @@ import re
 
 
 HUNK_RE = re.compile(r"@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
+ANCHOR_RE = re.compile(r"\[anchor:(?P<anchor>A\d{6})\]")
+TEST_PATH_PARTS = {"__tests__", "spec", "specs", "test", "tests"}
 
 
 @dataclass(slots=True)
@@ -13,6 +15,7 @@ class DiffLine:
     old_line: int | None
     new_line: int | None
     content: str
+    anchor: str | None = None
 
 
 @dataclass(slots=True)
@@ -29,6 +32,7 @@ class ChangedFile:
     hunks: list[DiffHunk] = field(default_factory=list)
     commentable_new_lines: set[int] = field(default_factory=set)
     added_new_lines: set[int] = field(default_factory=set)
+    line_anchors: dict[str, int] = field(default_factory=dict)
 
 
 def parse_unified_diff(diff_text: str) -> list[ChangedFile]:
@@ -123,6 +127,25 @@ def parse_patch(patch: str, file_path: str, old_path: str | None = None, new_pat
 
 def render_annotated_diff(files: list[ChangedFile], max_chars: int) -> tuple[str, list[str]]:
     warnings: list[str] = []
+    assign_line_anchors(files)
+
+    text = _render_annotated_files(files)
+    if len(text) > max_chars:
+        code_files = [file for file in files if not is_test_file(file.new_path)]
+        skipped_test_count = len(files) - len(code_files)
+        if code_files and skipped_test_count:
+            text = _render_annotated_files(code_files)
+            warnings.append(f"diff 内容超过 {max_chars} 字符，已跳过 {skipped_test_count} 个测试文件，优先审查业务代码。")
+
+    if len(text) > max_chars:
+        warnings.append(f"diff 内容超过 {max_chars} 字符，已截断；review 会优先覆盖前面的变更。")
+        text = _truncate_annotated_diff(text, max_chars)
+
+    prune_line_anchors(files, text)
+    return text, warnings
+
+
+def _render_annotated_files(files: list[ChangedFile]) -> str:
     parts: list[str] = []
 
     for file in files:
@@ -139,14 +162,70 @@ def render_annotated_diff(files: list[ChangedFile], max_chars: int) -> tuple[str
                 marker = {"add": "+", "delete": "-", "context": " "}.get(line.kind, " ")
                 old_value = line.old_line if line.old_line is not None else "-"
                 new_value = line.new_line if line.new_line is not None else "-"
-                parts.append(f"{marker} [old:{old_value}] [new:{new_value}] {line.content}")
+                anchor = f" [anchor:{line.anchor}]" if line.anchor else ""
+                parts.append(f"{marker}{anchor} [old:{old_value}] [new:{new_value}] {line.content}")
 
-    text = "\n".join(parts)
-    if len(text) > max_chars:
-        warnings.append(f"diff 内容超过 {max_chars} 字符，已截断；review 会优先覆盖前面的变更。")
-        text = text[:max_chars] + "\n[DIFF_TRUNCATED]"
+    return "\n".join(parts)
 
-    return text, warnings
+
+def assign_line_anchors(files: list[ChangedFile]) -> None:
+    counter = 1
+
+    for file in files:
+        file.line_anchors.clear()
+        for hunk in file.hunks:
+            for line in hunk.lines:
+                if line.kind in {"add", "context"} and line.new_line is not None:
+                    line.anchor = f"A{counter:06d}"
+                    file.line_anchors[line.anchor] = line.new_line
+                    counter += 1
+                else:
+                    line.anchor = None
+
+
+def is_test_file(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower().strip()
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+
+    if any(part in TEST_PATH_PARTS for part in parts[:-1]):
+        return True
+
+    filename = parts[-1]
+    stem = filename.rsplit(".", 1)[0]
+    return (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or stem.endswith("_spec")
+        or ".test." in filename
+        or ".spec." in filename
+        or "-test." in filename
+        or "-spec." in filename
+    )
+
+
+def prune_line_anchors(files: list[ChangedFile], rendered_text: str) -> None:
+    visible_anchors = set(ANCHOR_RE.findall(rendered_text))
+
+    for file in files:
+        file.line_anchors = {anchor: line for anchor, line in file.line_anchors.items() if anchor in visible_anchors}
+        for hunk in file.hunks:
+            for line in hunk.lines:
+                if line.anchor and line.anchor not in visible_anchors:
+                    line.anchor = None
+
+
+def _truncate_annotated_diff(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return "[DIFF_TRUNCATED]"
+
+    truncated = text[:max_chars]
+    newline_index = truncated.rfind("\n")
+    if newline_index > 0:
+        truncated = truncated[:newline_index]
+
+    return f"{truncated}\n[DIFF_TRUNCATED]" if truncated else "[DIFF_TRUNCATED]"
 
 
 def format_line_ranges(lines: set[int]) -> str:
