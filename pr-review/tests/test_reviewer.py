@@ -3,7 +3,7 @@ import unittest
 
 from app.diff_parser import parse_patch, render_annotated_diff
 from app.providers import PullRequestData, PullRequestRef
-from app.reviewer import _format_review_body, _normalize_comments, generate_review
+from app.reviewer import SYSTEM_PROMPT, _build_user_prompt, _format_review_body, _normalize_comments, generate_review
 
 
 class ReviewerTest(unittest.TestCase):
@@ -43,7 +43,7 @@ class ReviewerTest(unittest.TestCase):
         self.assertIn("修改建议：在循环前去重，避免重复写入。", body)
         self.assertIn("修改建议：在循环前去重，避免重复写入。\n\n```python\nseen = set()\n```", body)
 
-    def test_normalize_comments_snaps_to_nearest_commentable_line(self):
+    def test_normalize_comments_without_valid_anchor_is_not_publishable_and_not_snapped(self):
         changed_file = parse_patch(
             """diff --git a/app.py b/app.py
 --- a/app.py
@@ -63,10 +63,11 @@ class ReviewerTest(unittest.TestCase):
                 {
                     "file_path": "app.py",
                     "line": 15,
+                    "line_anchor": "A999999",
                     "category": "逻辑",
                     "severity": "建议",
                     "message": "这里需要挂到新增调用附近。",
-                    "suggestion": "把意见落到最近的可评论新行。",
+                    "suggestion": "缺少有效锚点时不要自动推送。",
                     "code_example": "do_something()",
                     "language": "python",
                 }
@@ -75,8 +76,27 @@ class ReviewerTest(unittest.TestCase):
         )
 
         self.assertEqual(len(comments), 1)
-        self.assertEqual(comments[0].line, 13)
-        self.assertTrue(comments[0].publishable)
+        self.assertEqual(comments[0].line, 15)
+        self.assertFalse(comments[0].publishable)
+        self.assertIn("缺少有效 line_anchor", comments[0].publish_warning or "")
+
+    def test_prompt_defines_new_line_basis(self):
+        ref = PullRequestRef(
+            platform="github",
+            scheme="https",
+            host="github.com",
+            project_path="org/repo",
+            number="1",
+            web_url="https://github.com/org/repo/pull/1",
+            owner="org",
+            repo="repo",
+        )
+        data = PullRequestData(ref=ref, title="line test", files=[], diff="")
+        prompt = _build_user_prompt(data, "+ [anchor:A000001] [old:-] [new:42] call()")
+
+        self.assertIn("[new:<数字>]", SYSTEM_PROMPT)
+        self.assertIn("当前磁盘文件行号", SYSTEM_PROMPT)
+        self.assertIn("line 必须以同一行的 `[new:<数字>]` 为准", prompt)
 
     def test_normalize_comments_uses_line_anchor_before_line_number(self):
         changed_file = parse_patch(

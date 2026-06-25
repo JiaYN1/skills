@@ -76,5 +76,5 @@ GitHub 使用 Pull Request Review Comment；GitLab 使用 Merge Request Discussi
 
 - 行级发布依赖平台 API 对 diff position 的校验；如果 PR 被更新，旧 review 结果可能需要重新生成。
 - 二进制文件或没有文本 patch 的文件会被跳过。
-- 发给模型的 diff 会为每条可评论新行生成 `line_anchor`，后端优先用锚点映射回真实行号；缺失锚点时才兜底校准到最近的可评论新行。
+- 发给模型的 diff 会为每条可评论新行生成 `line_anchor`，`line` 以同一行的 `[new:<数字>]` 为准；后端只在有效锚点能映射到当前 diff 时允许自动发布，缺失或无效锚点的意见只展示不推送。
 - diff 超过 `MAX_DIFF_CHARS` 时会优先跳过测试文件，尽量保留业务代码；仍超长才截断。

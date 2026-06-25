@@ -39,6 +39,7 @@ class DiffParserTest(unittest.TestCase):
         annotated, warnings = render_annotated_diff(files, max_chars=10000)
 
         self.assertEqual(warnings, [])
+        self.assertIn("行号基准: [new:<数字>]", annotated)
         self.assertIn("+ [anchor:A000002] [old:-] [new:1001] new_call()", annotated)
         self.assertIn("+ [anchor:A000003] [old:-] [new:1002] extra_call()", annotated)
         self.assertEqual(files[0].line_anchors["A000002"], 1001)

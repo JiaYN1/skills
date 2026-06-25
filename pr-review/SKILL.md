@@ -44,10 +44,17 @@ cd ~/code/msserviceprofiler_pr178 && git fetch origin merge-requests/178/head:pr
 # Detect target branch (master/main/develop) and get diff in one command
 cd ~/code/msserviceprofiler_pr178 && \
 MERGE_BASE=$(git merge-base origin/develop pr178) && \
-git diff $MERGE_BASE..pr178
+git diff --unified=10 $MERGE_BASE..pr178
 ```
-4. If merge-base still fails, fallback to: `git log --oneline origin/master..pr178` to see commits, then `git diff pr178~N..pr178` for last N commits
-check code in the commit and get the diff 
+4. If merge-base still fails, fallback to: `git log --oneline origin/master..pr178` to see commits, then `git diff --unified=10 pr178~N..pr178` for last N commits
+check code in the commit and get the diff
+
+### Line number定位机制
+
+- 发布或报告行号时，以 PR 变更后文件的绝对行号为准，也就是 unified diff 中 `+new_start,new_count` 推导出的 new line。不要使用 old line、hunk 内相对偏移或 diff 展示行号。
+- 本地 clone 后必须先 checkout 到 PR head，再用 `read_file` 返回的 1-based 行号核对问题位置；如果没有 checkout 到 PR head，当前磁盘行号不能作为发布依据。
+- 对函数或类内的问题，优先用 `list_symbols` 定位符号范围，再用 `read_symbol` 读取目标符号源码，最后把问题映射回 diff 中对应的新增行或上下文行。
+- `report_finding` 应引用 `read_file` 或 `read_symbol` 核对后的变更后绝对行号；如果无法映射到 PR diff 的可评论行，只输出展示型意见，不要推送行级评论。
 
 ### Step 3: Analyze the changes
 

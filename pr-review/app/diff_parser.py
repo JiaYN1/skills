@@ -146,7 +146,13 @@ def render_annotated_diff(files: list[ChangedFile], max_chars: int) -> tuple[str
 
 
 def _render_annotated_files(files: list[ChangedFile]) -> str:
-    parts: list[str] = []
+    if not files:
+        return ""
+
+    parts: list[str] = [
+        "行号基准: [new:<数字>] 是 PR 变更后文件的绝对行号，也是发布评论使用的 line；[old:<数字>] 只用于理解上下文。",
+        "定位规则: 只能选择带 [anchor:<值>] 的行；同一条 comment 的 line_anchor 和 line 必须来自同一行。",
+    ]
 
     for file in files:
         parts.append(f"文件: {file.new_path}")

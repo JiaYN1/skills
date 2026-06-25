@@ -78,13 +78,14 @@ SYSTEM_PROMPT = """你是一个严谨的 PR 代码审查助手。你只审查给
 规则：
 1. 每条意见必须是真实、具体、可执行的问题。
 2. file_path 必须严格使用 diff 中出现的文件路径。
-3. 必须选择带 `[anchor:<值>]` 的可评论新行；如果问题发生在删除行或整段逻辑上，挂到最近的相关 anchor 行。
-4. line_anchor 必须原样复制该行的 anchor 值；line 必须填写同一行 `new:<数字>` 的数字，不能填写 hunk 序号、old 行号或相对偏移。
-5. message 写中文，包含具体风险或行为后果，不要写泛泛建议。
-6. suggestion 写中文，说明具体修改方向。
-7. code_example 默认可以写简短伪代码；只有当修正代码不超过 10 行时，才给出可直接参考的完整修正代码。
-8. 没有实际问题时返回空 comments。
-9. 只输出符合 JSON schema 的 JSON，不要输出 Markdown。"""
+3. 行号基准只能使用 diff 中同一行的 `[new:<数字>]`；它是 PR 变更后文件的绝对行号，也是发布用行号。不要使用 `[old:<数字>]`、`@@` hunk 起始行、相对偏移、工具展示行号或当前磁盘文件行号。
+4. 必须选择带 `[anchor:<值>]` 的可评论新行；如果问题发生在删除行或整段逻辑上，挂到最近的相关 anchor 行。找不到可映射的 anchor 时不要输出该 comment。
+5. line_anchor 必须原样复制该行的 anchor 值；line 必须填写同一行 `[new:<数字>]` 的数字，不能填写 hunk 序号、old 行号或相对偏移。
+6. message 写中文，包含具体风险或行为后果，不要写泛泛建议。
+7. suggestion 写中文，说明具体修改方向。
+8. code_example 默认可以写简短伪代码；只有当修正代码不超过 10 行时，才给出可直接参考的完整修正代码。
+9. 没有实际问题时返回空 comments。
+10. 只输出符合 JSON schema 的 JSON，不要输出 Markdown。"""
 
 
 async def generate_review(data: PullRequestData, model: str | None = None) -> tuple[list[ReviewComment], ReviewSummary, list[str]]:
@@ -108,17 +109,7 @@ async def _call_llm(data: PullRequestData, annotated_diff: str, model: str | Non
     selected_model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
-    user_prompt = f"""请审查以下 PR diff，并返回结构化 JSON。
-
-PR: {data.ref.web_url}
-平台: {data.ref.platform}
-仓库: {data.ref.project_path}
-标题: {data.title or ""}
-
-说明：diff 中只有带 `[anchor:<值>]` 的行可以发布行级评论。每条 comment 必须同时填写 `line_anchor` 和对应的 `line`。
-
-{annotated_diff}
-"""
+    user_prompt = _build_user_prompt(data, annotated_diff)
 
     payload: dict[str, Any] = {
         "model": selected_model,
@@ -156,6 +147,23 @@ PR: {data.ref.web_url}
     return _parse_json_content(content)
 
 
+def _build_user_prompt(data: PullRequestData, annotated_diff: str) -> str:
+    return f"""请审查以下 PR diff，并返回结构化 JSON。
+
+PR: {data.ref.web_url}
+平台: {data.ref.platform}
+仓库: {data.ref.project_path}
+标题: {data.title or ""}
+
+说明：
+- diff 中只有带 `[anchor:<值>]` 的行可以发布行级评论。
+- line 必须以同一行的 `[new:<数字>]` 为准；不要使用 hunk 序号、old 行号、当前磁盘文件行号或相对偏移。
+- 每条 comment 必须同时填写 `line_anchor` 和对应的 `line`。
+
+{annotated_diff}
+"""
+
+
 def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedFile]) -> list[ReviewComment]:
     path_map = {file.new_path: file for file in files}
     comments: list[ReviewComment] = []
@@ -165,6 +173,7 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
             continue
 
         anchor_target = _resolve_line_anchor(_clean_text(raw.get("line_anchor")), files)
+        has_valid_anchor = anchor_target is not None
         if anchor_target:
             file_path, requested_line = anchor_target
         else:
@@ -176,6 +185,9 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
                 requested_line = int(raw.get("line"))
             except (TypeError, ValueError):
                 continue
+
+        if requested_line < 1:
+            continue
 
         category = str(raw.get("category", "可维护性"))
         if category not in CATEGORIES:
@@ -194,10 +206,12 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
             continue
 
         changed_file = path_map[file_path]
-        line = _normalize_comment_line(requested_line, changed_file)
-        publishable = line in changed_file.commentable_new_lines
+        line = requested_line
+        publishable = has_valid_anchor and line in changed_file.commentable_new_lines
         publish_warning = None
-        if not publishable:
+        if not has_valid_anchor:
+            publish_warning = "缺少有效 line_anchor，为避免推送到错误行，只展示，不能自动发布。"
+        elif not publishable:
             publish_warning = "该行不在 PR diff 的可评论新行中，只能展示，不能自动发布。"
 
         body = _format_review_body(
@@ -295,14 +309,6 @@ def _resolve_line_anchor(raw_anchor: str, files: list[ChangedFile]) -> tuple[str
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _normalize_comment_line(line: int, changed_file: ChangedFile) -> int:
-    if line in changed_file.commentable_new_lines or not changed_file.commentable_new_lines:
-        return line
-
-    ordered_lines = sorted(changed_file.commentable_new_lines)
-    return min(ordered_lines, key=lambda candidate: (abs(candidate - line), candidate))
 
 
 def _strip_code_fence(value: str) -> str:
