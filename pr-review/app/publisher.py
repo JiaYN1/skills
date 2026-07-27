@@ -125,7 +125,7 @@ async def _publish_gitcode_comments(pr_url: str, comments: list[ReviewComment], 
                 )
                 continue
 
-            position = _gitcode_diff_position(changed_file, comment.line)
+            position = _gitcode_comment_position(changed_file, comment.line)
             if position is None:
                 results.append(
                     PublishItemResult(
@@ -242,21 +242,15 @@ async def _latest_gitlab_version(mr_url: str, headers: dict[str, str], data) -> 
     return {"base_sha": base_sha, "start_sha": start_sha, "head_sha": head_sha}
 
 
-def _gitcode_diff_position(file: ChangedFile, new_line: int) -> int | None:
-    position = 0
-    seen_hunk = False
+def _gitcode_comment_position(file: ChangedFile, new_line: int) -> int | None:
+    """Return GitCode's position: the absolute line number in the new file.
 
-    for hunk in file.hunks:
-        if seen_hunk:
-            position += 1
-        seen_hunk = True
-
-        for line in hunk.lines:
-            position += 1
-            if line.new_line == new_line and line.kind in {"add", "context"}:
-                return position
-
-    return None
+    GitCode's API calls this field ``position``, but it expects the new-file
+    line number rather than a line offset within the unified diff. Mapping it
+    to the diff offset makes comments drift upward in large or multi-hunk
+    changes.
+    """
+    return new_line if new_line in file.commentable_new_lines else None
 
 
 def _safe_json(response: httpx.Response) -> dict:
