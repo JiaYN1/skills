@@ -80,6 +80,8 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 部分 OpenAI-compatible 网关会忽略 `n=8` 的逐张返回约定，把 8 帧合成一张 4×2 或 2×4 的 contact sheet。服务端会在资源归一化前识别并拆成独立 PNG；因此旧任务中已经生成的“大图”不会自动修复，需要重新生成资源包。直接打开 PNG 或 ZIP 也只是静态资源，动画预览应运行 `pet_runtime.py` 或最终 exe。
 
+背景参数会按图像模型自动选择：`gpt-image-1`/`gpt-image-1.5` 可以请求透明 PNG；`gpt-image-2` 不发送 `background=transparent`，改用纯色背景后由服务端抠图。这样可以避免 gpt-image-2 的透明背景参数错误。
+
 常用环境变量：
 
 ```dotenv

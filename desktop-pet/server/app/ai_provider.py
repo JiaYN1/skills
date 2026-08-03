@@ -63,6 +63,7 @@ class OpenAICompatibleImageProvider:
             role_count = getattr(self.settings, "frame_count_for_role", None)
             configured_count = role_count(role) if callable(role_count) else self.settings.ai_frame_count
         count = frame_count_for_role(role, configured_count)
+        transparent_background = self._transparent_background_support(self.settings.ai_image_model)
         prompt = self._prompt_for(
             role,
             frame_count=count,
@@ -71,6 +72,7 @@ class OpenAICompatibleImageProvider:
                 if pose_consistency is None
                 else bool(pose_consistency)
             ),
+            transparent_background=transparent_background,
         )
         reference_paths = self._reference_paths(references, identity_reference)
         reference_paths = reference_paths[: self.settings.ai_max_references]
@@ -113,6 +115,41 @@ class OpenAICompatibleImageProvider:
                 result.append(path)
         return result
 
+    @staticmethod
+    def _transparent_background_support(model: str) -> Optional[bool]:
+        """Return known transparent-background support for an image model.
+
+        ``gpt-image-2`` currently rejects ``background=transparent``.  Keep
+        unknown compatible model names undecided so the request-level fallback
+        can still discover what the gateway accepts.
+        """
+
+        normalized = str(model or "").strip().lower()
+        if normalized == "gpt-image-2" or normalized.startswith("gpt-image-2-"):
+            return False
+        if normalized in {"gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5"}:
+            return True
+        if normalized.startswith("gpt-image-1-") or normalized.startswith("gpt-image-1.5-"):
+            return True
+        return None
+
+    @classmethod
+    def _request_attempts(cls, model: str, base_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Build model-aware request payloads from richest to minimal."""
+
+        transparent_support = cls._transparent_background_support(model)
+        if transparent_support is False:
+            return [
+                dict(base_data, output_format="png"),
+                dict(base_data, n=1, output_format="png"),
+                dict(base_data, n=1),
+            ]
+        return [
+            dict(base_data, background="transparent", output_format="png"),
+            dict(base_data, background="transparent"),
+            dict(base_data, n=1),
+        ]
+
     async def _request(
         self,
         prompt: str,
@@ -130,13 +167,10 @@ class OpenAICompatibleImageProvider:
             "size": "1024x1024",
         }
 
-        # Optional fields are accepted by current image APIs but not by every
-        # OpenAI-compatible gateway. Retry with the minimal shape if rejected.
-        attempts = [
-            dict(base_data, background="transparent", output_format="png"),
-            dict(base_data, background="transparent"),
-            dict(base_data, n=1),
-        ]
+        # Optional fields are accepted by some image APIs but not by every
+        # model or OpenAI-compatible gateway. In particular, gpt-image-2
+        # currently rejects background=transparent, so do not send it at all.
+        attempts = self._request_attempts(self.settings.ai_image_model, base_data)
         last_error = "未知错误"
         async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
             for data in attempts:
@@ -176,6 +210,7 @@ class OpenAICompatibleImageProvider:
         role: str,
         frame_count: int = 8,
         pose_consistency: bool = True,
+        transparent_background: Optional[bool] = None,
     ) -> str:
         action = ROLE_PROMPTS.get(role, ROLE_PROMPTS["idle"])
         count = frame_count_for_role(role, frame_count)
@@ -191,15 +226,29 @@ class OpenAICompatibleImageProvider:
             if pose_consistency
             else "Keep the animal recognizable and full-body in every frame."
         )
+        if transparent_background is True:
+            background = (
+                "Use a fully transparent background or a perfectly flat removable green background "
+                "if the service cannot return alpha."
+            )
+        elif transparent_background is False:
+            background = (
+                "Use a perfectly flat white or green background with no shadows; the server will remove "
+                "this background after generation because this model does not support transparent output."
+            )
+        else:
+            background = (
+                "Use a fully transparent background when supported; otherwise use a perfectly flat "
+                "white or green background that can be removed after generation."
+            )
         return (
             "Use case: identity-preserve. Asset type: a frame-by-frame 2D desktop-pet animation. "
             "Input images: Image 1 is the identity reference; later images are pose references only. "
             "Create exactly the same pet shown in the reference images. "
             f"{consistency} "
-            "Show the pet full body, centered, in a clean game-sprite style, with transparent background. "
+            "Show the pet full body, centered, in a clean game-sprite style. "
             f"The action is {action}. Generate exactly {count} separate PNG frames, in order, not a contact sheet. "
             f"The ordered pose plan is: {sequence}. "
-            "Use a fully transparent background or a perfectly flat removable green background if the service "
-            "cannot return alpha. Keep clean anti-aliased edges, no text, no frame, no room, no people, "
+            f"{background} Keep clean anti-aliased edges, no text, no frame, no room, no people, "
             "no watermark, no shadow, and no extra animals."
         )
