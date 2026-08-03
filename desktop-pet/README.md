@@ -78,6 +78,8 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 如果只需要位图，可选择 `png`；如果只需要骨骼清单，可选择 `skeleton`。没有 AI 或 AI 失败时，资源包仍会使用照片和同一套骨骼/程序化动画兜底。
 
+部分 OpenAI-compatible 网关会忽略 `n=8` 的逐张返回约定，把 8 帧合成一张 4×2 或 2×4 的 contact sheet。服务端会在资源归一化前识别并拆成独立 PNG；因此旧任务中已经生成的“大图”不会自动修复，需要重新生成资源包。直接打开 PNG 或 ZIP 也只是静态资源，动画预览应运行 `pet_runtime.py` 或最终 exe。
+
 常用环境变量：
 
 ```dotenv

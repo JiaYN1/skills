@@ -116,6 +116,39 @@ def get_job(job_id: str) -> Dict[str, Any]:
         raise HTTPException(404, "任务不存在")
 
 
+@app.post("/api/jobs/{job_id}/build-exe")
+def request_exe_build(job_id: str) -> Dict[str, Any]:
+    """Queue the Windows build for an already generated resource package."""
+
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if settings.build_mode != "worker":
+        raise HTTPException(409, "当前服务未启用 Windows Worker，请将 BUILD_MODE 设置为 worker")
+    if not settings.worker_token:
+        raise HTTPException(503, "Windows Worker 未配置 WORKER_TOKEN")
+
+    package = record.get("package_path")
+    if not package or not Path(package).exists():
+        raise HTTPException(409, "资源包尚未生成完成")
+    if record.get("artifact_kind") == "exe":
+        raise HTTPException(409, "该任务已经生成 Windows exe")
+    if record.get("status") not in {"ready", "failed"}:
+        raise HTTPException(409, f"当前任务状态为 {record.get('status') or 'unknown'}，暂时不能打包 exe")
+
+    store.update(
+        job_id,
+        build_exe=True,
+        status="ready_for_build",
+        progress=90,
+        message="已提交 Windows exe 打包请求，等待 Worker",
+        error="",
+    )
+    return _public_job(store.read(job_id))
+
+
 @app.get("/api/jobs/{job_id}/download")
 def download_job(job_id: str):
     try:

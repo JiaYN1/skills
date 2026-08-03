@@ -24,6 +24,12 @@ from pet_common import IMAGE_EXTENSIONS, ROLE_LABELS, ROLES, assign_roles, safe_
 
 APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = APP_ROOT / "generated-pets"
+PYINSTALLER_PIL_OPTIONS = [
+    "--collect-all",
+    "PIL",
+    "--hidden-import",
+    "PIL._imaging",
+]
 
 
 def _as_path_list(values: Sequence[str]) -> List[Path]:
@@ -111,6 +117,7 @@ def build_exe(package_dir: Path, pet_name: str) -> Path:
         "--clean",
         "--onefile",
         "--noconsole",
+        *PYINSTALLER_PIL_OPTIONS,
         "--name",
         safe_name,
         "--distpath",
@@ -144,6 +151,21 @@ def build_exe(package_dir: Path, pet_name: str) -> Path:
     executable = dist_dir / (f"{safe_name}.exe" if os.name == "nt" else safe_name)
     if not executable.exists():
         raise RuntimeError("PyInstaller 没有生成预期的可执行文件")
+    self_test = subprocess.run(
+        [str(executable), "--self-test"],
+        cwd=package_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    if self_test.returncode != 0:
+        details = (self_test.stderr or self_test.stdout).strip()
+        raise RuntimeError(
+            "生成的 exe 自检失败，Pillow 原生扩展可能未被打包：\n"
+            f"{details[-3000:]}"
+        )
     return executable
 
 
@@ -157,9 +179,10 @@ class CreatorApp(tk.Tk):
         self.name_var = tk.StringVar(value="我的宠物")
         self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
         self.use_rembg_var = tk.BooleanVar(value=False)
-        self.build_exe_var = tk.BooleanVar(value=True)
         self.animation_mode_var = tk.StringVar(value="hybrid")
         self.status_var = tk.StringVar(value="请选择 1-8 张照片。第一张作为待机动作。")
+        self.last_package_dir: Optional[Path] = None
+        self._busy = False
         self._build_ui()
 
     def _build_ui(self):
@@ -213,11 +236,6 @@ class CreatorApp(tk.Tk):
             text="尝试自动抠图（需要额外安装 rembg，失败时自动使用轻量抠图）",
             variable=self.use_rembg_var,
         ).pack(anchor="w")
-        ttk.Checkbutton(
-            options,
-            text="同时生成 Windows exe（需要在 Windows 环境安装 PyInstaller）",
-            variable=self.build_exe_var,
-        ).pack(anchor="w", pady=(5, 0))
         animation_options = ttk.Frame(options)
         animation_options.pack(fill="x", pady=(10, 0))
         ttk.Label(animation_options, text="动画输出").pack(side="left")
@@ -236,7 +254,14 @@ class CreatorApp(tk.Tk):
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(16, 0))
         ttk.Label(footer, textvariable=self.status_var).pack(side="left", fill="x", expand=True)
-        self.generate_button = ttk.Button(footer, text="生成宠物", command=self._generate)
+        self.build_exe_button = ttk.Button(
+            footer,
+            text="第二步：打包 Windows exe",
+            command=self._build_exe,
+            state="disabled",
+        )
+        self.build_exe_button.pack(side="right", padx=(0, 8))
+        self.generate_button = ttk.Button(footer, text="第一步：生成资源", command=self._generate)
         self.generate_button.pack(side="right")
 
     def _add_photos(self):
@@ -284,7 +309,12 @@ class CreatorApp(tk.Tk):
             self.output_var.set(path)
 
     def _set_busy(self, busy: bool):
+        self._busy = busy
         self.generate_button.configure(state="disabled" if busy else "normal")
+        can_build = bool(self.last_package_dir and self.last_package_dir.exists())
+        self.build_exe_button.configure(
+            state="disabled" if busy or not can_build else "normal"
+        )
 
     def _generate(self):
         if not self.photo_paths:
@@ -295,37 +325,59 @@ class CreatorApp(tk.Tk):
             return
 
         self._set_busy(True)
+        self.last_package_dir = None
         self.status_var.set("正在处理照片，请稍候……")
         arguments = (
             list(self.photo_paths),
             self.name_var.get().strip(),
             Path(self.output_var.get()).expanduser(),
             self.use_rembg_var.get(),
-            self.build_exe_var.get(),
             self.animation_mode_var.get(),
         )
         threading.Thread(target=self._generate_worker, args=(arguments,), daemon=True).start()
 
     def _generate_worker(self, arguments):
-        photos, name, output, use_rembg, should_build, animation_mode = arguments
+        photos, name, output, use_rembg, animation_mode = arguments
         try:
             package_dir = create_package(photos, name, output, use_rembg, animation_mode)
-            executable = None
-            if should_build:
-                self.after(0, lambda: self.status_var.set("资源已生成，正在调用 PyInstaller 打包……"))
-                executable = build_exe(package_dir, name)
-            self.after(0, lambda: self._generation_done(package_dir, executable))
+            self.after(0, lambda: self._generation_done(package_dir))
         except Exception as error:
             self.after(0, lambda: self._generation_failed(error))
 
-    def _generation_done(self, package_dir: Path, executable: Optional[Path]):
+    def _generation_done(self, package_dir: Path):
+        self.last_package_dir = package_dir
         self._set_busy(False)
-        if executable:
-            self.status_var.set(f"完成：{executable}")
-            messagebox.showinfo("生成完成", f"Windows exe 已生成：\n{executable}")
-        else:
-            self.status_var.set(f"资源包已生成：{package_dir}")
-            messagebox.showinfo("生成完成", f"资源包已生成：\n{package_dir}")
+        self.status_var.set(f"资源包已生成：{package_dir}")
+        messagebox.showinfo(
+            "第一步完成",
+            f"资源包已生成：\n{package_dir}\n\n现在可以点击“第二步：打包 Windows exe”。",
+        )
+
+    def _build_exe(self):
+        if not self.last_package_dir or not self.last_package_dir.exists():
+            messagebox.showwarning("还没有资源包", "请先完成第一步：生成资源。")
+            return
+        self._set_busy(True)
+        package_dir = self.last_package_dir
+        pet_name = self.name_var.get().strip() or "我的宠物"
+        self.status_var.set("资源已生成，正在调用 PyInstaller 打包……")
+        threading.Thread(
+            target=self._build_exe_worker,
+            args=(package_dir, pet_name),
+            daemon=True,
+        ).start()
+
+    def _build_exe_worker(self, package_dir: Path, pet_name: str):
+        try:
+            executable = build_exe(package_dir, pet_name)
+            self.after(0, lambda: self._exe_done(executable))
+        except Exception as error:
+            self.after(0, lambda: self._generation_failed(error))
+
+    def _exe_done(self, executable: Path):
+        self._set_busy(False)
+        self.status_var.set(f"完成：{executable}")
+        messagebox.showinfo("第二步完成", f"Windows exe 已生成：\n{executable}")
 
     def _generation_failed(self, error: Exception):
         self._set_busy(False)

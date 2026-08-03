@@ -6,10 +6,13 @@ const percentText = document.querySelector("#percent");
 const messageText = document.querySelector("#message");
 const barFill = document.querySelector("#bar-fill");
 const download = document.querySelector("#download");
+const buildExeButton = document.querySelector("#build-exe-button");
 const adminTokenInput = document.querySelector("#admin-token");
 const aiSettingsForm = document.querySelector("#ai-settings-form");
 const loadAiSettingsButton = document.querySelector("#load-ai-settings");
 const aiSettingsStatus = document.querySelector("#ai-settings-status");
+let currentJobId = null;
+let currentJob = null;
 
 function adminHeaders() {
   const token = adminTokenInput.value.trim();
@@ -91,6 +94,7 @@ aiSettingsForm.addEventListener("submit", async (event) => {
 });
 
 function showProgress(job) {
+  currentJob = job;
   progress.classList.remove("hidden");
   statusText.textContent = job.status || "processing";
   const percent = Math.max(0, Math.min(100, Number(job.progress || 0)));
@@ -102,6 +106,9 @@ function showProgress(job) {
     download.classList.remove("hidden");
     download.textContent = job.artifact_kind === "exe" ? "下载 Windows exe" : "下载资源包 zip";
   }
+  buildExeButton.disabled = !(
+    currentJobId && job.status === "ready" && job.artifact_kind === "zip"
+  );
 }
 
 async function poll(jobId) {
@@ -118,6 +125,9 @@ async function poll(jobId) {
 
 function showError(error) {
   submitButton.disabled = false;
+  buildExeButton.disabled = !(
+    currentJobId && currentJob && currentJob.status === "ready" && currentJob.artifact_kind === "zip"
+  );
   progress.classList.remove("hidden");
   statusText.textContent = "failed";
   messageText.textContent = error.message || String(error);
@@ -128,17 +138,36 @@ form.addEventListener("submit", async (event) => {
   const files = document.querySelector("#photos").files;
   if (!files.length) return;
   submitButton.disabled = true;
+  buildExeButton.disabled = true;
+  currentJobId = null;
+  currentJob = null;
   download.classList.add("hidden");
   const body = new FormData(form);
   body.delete("photos");
   for (const file of files) body.append("photos", file);
-  body.set("build_exe", document.querySelector("#build-exe").checked ? "true" : "false");
+  body.set("build_exe", "false");
   try {
     const response = await fetch("/api/pets/generate", { method: "POST", body });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "提交失败");
+    currentJobId = payload.id;
     showProgress(payload);
     await poll(payload.id);
+  } catch (error) {
+    showError(error);
+  }
+});
+
+buildExeButton.addEventListener("click", async () => {
+  if (!currentJobId) return;
+  buildExeButton.disabled = true;
+  submitButton.disabled = true;
+  try {
+    const response = await fetch(`/api/jobs/${currentJobId}/build-exe`, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "提交 exe 打包请求失败");
+    showProgress(payload);
+    await poll(currentJobId);
   } catch (error) {
     showError(error);
   }

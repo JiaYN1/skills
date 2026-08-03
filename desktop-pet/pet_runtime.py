@@ -453,10 +453,25 @@ def run_pet(config_path: Optional[Union[str, Path]] = None) -> None:
         raise
 
 
+def self_test_runtime() -> None:
+    """Import the bundled Pillow extensions without creating a GUI window."""
+
+    from PIL import Image, ImageEnhance, ImageTk  # noqa: F401
+    import PIL._imaging  # noqa: F401
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a generated desktop pet")
     parser.add_argument("--config", help="path to pet_config.json for preview")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="verify bundled Pillow extensions without starting the desktop window",
+    )
     args = parser.parse_args()
+    if args.self_test:
+        self_test_runtime()
+        return
     run_pet(args.config)
 
 

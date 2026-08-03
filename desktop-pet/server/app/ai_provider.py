@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pet_animation import frame_count_for_role, pose_plan_for  # noqa: E402
+from pet_assets import split_contact_sheet_bytes  # noqa: E402
 
 
 ROLE_PROMPTS = {
@@ -75,6 +76,8 @@ class OpenAICompatibleImageProvider:
         reference_paths = reference_paths[: self.settings.ai_max_references]
         response = await self._request(prompt, reference_paths, frame_count=count)
         payload = response.json()
+        if not isinstance(payload, dict):
+            raise ImageGenerationError("图像服务返回了无法识别的数据格式")
         items = payload.get("data") or payload.get("images") or []
         if not isinstance(items, list):
             raise ImageGenerationError("图像服务返回了无法识别的数据格式")
@@ -85,9 +88,19 @@ class OpenAICompatibleImageProvider:
                 image_bytes = await self._decode_item(client, item)
                 if not image_bytes:
                     continue
-                target = output_dir / f"{role}_{index}.png"
-                target.write_bytes(image_bytes)
-                output_paths.append(target)
+                frame_bytes = (
+                    split_contact_sheet_bytes(image_bytes, count)
+                    if len(items) == 1
+                    else [image_bytes]
+                )
+                for frame in frame_bytes:
+                    target = output_dir / f"{role}_{len(output_paths)}.png"
+                    target.write_bytes(frame)
+                    output_paths.append(target)
+                    if len(output_paths) >= count:
+                        break
+                if len(output_paths) >= count:
+                    break
         return output_paths
 
     @staticmethod

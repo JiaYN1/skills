@@ -123,5 +123,10 @@ Worker Token 必须和 Windows 的 `worker/.env` 完全一致，且不能复用�
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-然后保留 Worker 的完整错误日志。不要删除服务器任务目录，因为其中包含复现任务所需的资源包。
+Worker 会显式收集 Pillow 的原生扩展，并在上传 exe 前运行 `--self-test`。如果旧版 exe 报 `ImportError: cannot import name '_imaging' from 'PIL'`，说明它是在修复前生成的，需要让 Worker 使用最新代码重新领取并生成任务。也可以先验证当前环境：
 
+```powershell
+.\.venv\Scripts\python.exe -c "from PIL import Image; import PIL._imaging; print('Pillow OK')"
+```
+
+然后保留 Worker 的完整错误日志。不要删除服务器任务目录，因为其中包含复现任务所需的资源包。

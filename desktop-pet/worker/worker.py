@@ -18,6 +18,12 @@ import requests
 SERVER_URL = os.getenv("PET_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN", "")
 POLL_SECONDS = max(2, int(os.getenv("POLL_SECONDS", "5")))
+PYINSTALLER_PIL_OPTIONS = [
+    "--collect-all",
+    "PIL",
+    "--hidden-import",
+    "PIL._imaging",
+]
 
 
 def main() -> None:
@@ -111,6 +117,7 @@ def build_exe(package: Path, pet_name: str) -> Path:
         "--clean",
         "--onefile",
         "--noconsole",
+        *PYINSTALLER_PIL_OPTIONS,
         "--name",
         safe_name,
         "--distpath",
@@ -133,6 +140,21 @@ def build_exe(package: Path, pet_name: str) -> Path:
     executable = dist / f"{safe_name}.exe"
     if not executable.exists():
         raise RuntimeError("PyInstaller 没有生成 exe")
+    self_test = subprocess.run(
+        [str(executable), "--self-test"],
+        cwd=str(package),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    if self_test.returncode != 0:
+        details = (self_test.stderr or self_test.stdout).strip()
+        raise RuntimeError(
+            "生成的 exe 自检失败，Pillow 原生扩展可能未被打包：\n"
+            f"{details[-3000:]}"
+        )
     return executable
 
 

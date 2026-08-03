@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -27,6 +28,29 @@ class WorkerConnectionTests(unittest.TestCase):
         self.assertEqual(get.call_count, 2)
         self.assertEqual(get.call_args_list[1].args[0], f"{worker.SERVER_URL}/api/worker/healthz")
         self.assertEqual(get.call_args_list[1].kwargs["headers"], worker.headers())
+
+
+class WorkerBuildCommandTests(unittest.TestCase):
+    @patch("worker.subprocess.run")
+    def test_build_collects_pillow_native_extension(self, run: Mock) -> None:
+        run.return_value.returncode = 0
+        run.return_value.stdout = ""
+        run.return_value.stderr = ""
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "package"
+            executable = package / "dist" / "Build_Test.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"test executable")
+
+            result = worker.build_exe(package, "Build Test")
+
+            self.assertEqual(result, executable)
+            command = run.call_args_list[0].args[0]
+            collect_index = command.index("--collect-all")
+            hidden_index = command.index("--hidden-import")
+            self.assertEqual(command[collect_index + 1], "PIL")
+            self.assertEqual(command[hidden_index + 1], "PIL._imaging")
+            self.assertEqual(run.call_args_list[1].args[0][-1], "--self-test")
 
 
 if __name__ == "__main__":

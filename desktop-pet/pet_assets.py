@@ -7,7 +7,7 @@ plain Pillow. Installing ``rembg`` enables model-based background removal.
 from collections import deque
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 
 def _remove_simple_background(image, tolerance: int = 28):
@@ -98,6 +98,209 @@ def subject_bbox(image) -> Optional[Tuple[int, int, int, int]]:
     """Return the visible subject bounds for an RGBA image."""
 
     return image.convert("RGBA").getchannel("A").getbbox()
+
+
+def _contact_sheet_grids(frame_count: int) -> List[Tuple[int, int]]:
+    """Return likely contact-sheet layouts for a requested frame count."""
+
+    return {
+        2: [(2, 1), (1, 2)],
+        3: [(3, 1), (1, 3)],
+        4: [(2, 2), (4, 1), (1, 4)],
+        5: [(5, 1), (1, 5)],
+        6: [(3, 2), (2, 3), (6, 1), (1, 6)],
+        8: [(4, 2), (2, 4), (8, 1), (1, 8)],
+        9: [(3, 3)],
+        10: [(5, 2), (2, 5)],
+        12: [(4, 3), (3, 4)],
+    }.get(frame_count, [])
+
+
+def _contact_sheet_grid(frame_count: int) -> Optional[Tuple[int, int]]:
+    """Return the preferred contact-sheet grid for compatibility."""
+
+    grids = _contact_sheet_grids(frame_count)
+    return grids[0] if grids else None
+
+
+def _contact_sheet_tile_bounds(image, columns: int, rows: int, column: int, row: int):
+    width, height = image.size
+    return (
+        round(width * column / columns),
+        round(height * row / rows),
+        round(width * (column + 1) / columns),
+        round(height * (row + 1) / rows),
+    )
+
+
+def _contact_sheet_seam_score(image, columns: int, rows: int) -> float:
+    """Estimate how discontinuous the regular grid seams are."""
+
+    width, height = image.size
+    pixels = image.convert("RGBA").load()
+    differences = []
+    for column in range(1, columns):
+        x = round(width * column / columns)
+        for y in range(height):
+            left = pixels[max(0, x - 1), y]
+            right = pixels[min(width - 1, x), y]
+            differences.append(sum(abs(left[index] - right[index]) for index in range(4)) / 1020.0)
+    for row in range(1, rows):
+        y = round(height * row / rows)
+        for x in range(width):
+            top = pixels[x, max(0, y - 1)]
+            bottom = pixels[x, min(height - 1, y)]
+            differences.append(sum(abs(top[index] - bottom[index]) for index in range(4)) / 1020.0)
+    return sum(differences) / len(differences) if differences else 0.0
+
+
+def _contact_sheet_tile_has_content(tile) -> bool:
+    """Return whether one candidate cell contains a visible subject."""
+
+    from PIL import ImageStat
+
+    tile = tile.convert("RGBA")
+    alpha = tile.getchannel("A")
+    alpha_min, alpha_max = alpha.getextrema()
+    if alpha_min < 255:
+        alpha_bbox = alpha.getbbox()
+        if alpha_bbox:
+            bbox_area = (alpha_bbox[2] - alpha_bbox[0]) * (alpha_bbox[3] - alpha_bbox[1])
+            if bbox_area >= tile.width * tile.height * 0.01:
+                return True
+
+    rgb = tile.convert("RGB")
+    corners = [
+        rgb.getpixel((0, 0)),
+        rgb.getpixel((max(0, rgb.width - 1), 0)),
+        rgb.getpixel((0, max(0, rgb.height - 1))),
+        rgb.getpixel((max(0, rgb.width - 1), max(0, rgb.height - 1))),
+    ]
+    background = tuple(sum(pixel[index] for pixel in corners) / len(corners) for index in range(3))
+    step = max(1, min(rgb.width, rgb.height) // 64)
+    foreground = 0
+    samples = 0
+    for y in range(0, rgb.height, step):
+        for x in range(0, rgb.width, step):
+            pixel = rgb.getpixel((x, y))
+            distance = sum((pixel[index] - background[index]) ** 2 for index in range(3))
+            if distance >= 24 * 24 * 3:
+                foreground += 1
+            samples += 1
+    foreground_ratio = foreground / float(max(1, samples))
+    variance = sum(ImageStat.Stat(rgb).var) / 3.0
+    return foreground_ratio >= 0.01 or variance >= 90.0
+
+
+def _contact_sheet_content_count(image, columns: int, rows: int) -> int:
+    """Count grid cells that contain a visible or visually complex subject."""
+
+    visible = 0
+    for row in range(rows):
+        for column in range(columns):
+            tile = image.crop(_contact_sheet_tile_bounds(image, columns, rows, column, row))
+            if _contact_sheet_tile_has_content(tile):
+                visible += 1
+    return visible
+
+
+def _contact_sheet_background_score(image, columns: int, rows: int) -> float:
+    """Estimate whether cells share a repeated flat/transparent background."""
+
+    colors = []
+    for row in range(rows):
+        for column in range(columns):
+            tile = image.crop(_contact_sheet_tile_bounds(image, columns, rows, column, row)).convert("RGBA")
+            colors.extend(
+                [
+                    tile.getpixel((0, 0)),
+                    tile.getpixel((max(0, tile.width - 1), 0)),
+                    tile.getpixel((0, max(0, tile.height - 1))),
+                    tile.getpixel((max(0, tile.width - 1), max(0, tile.height - 1))),
+                ]
+            )
+    if not colors:
+        return 0.0
+    average = tuple(sum(color[index] for color in colors) / len(colors) for index in range(4))
+    deviation = sum(
+        sum(abs(color[index] - average[index]) for index in range(4)) / 1020.0
+        for color in colors
+    ) / len(colors)
+    return max(0.0, min(1.0, 1.0 - deviation / 0.30))
+
+
+def _contact_sheet_score(image, columns: int, rows: int, frame_count: int) -> float:
+    """Score a candidate grid while avoiding ordinary single-frame images."""
+
+    content_count = _contact_sheet_content_count(image, columns, rows)
+    minimum_content = max(2, (frame_count * 3 + 4) // 5)
+    if content_count < minimum_content:
+        return -1.0
+
+    seam_score = _contact_sheet_seam_score(image, columns, rows)
+    background_score = _contact_sheet_background_score(image, columns, rows)
+    content_ratio = content_count / float(frame_count)
+
+    # A collage usually has either hard cell seams or the same flat/transparent
+    # background repeated around each independently framed subject. A normal
+    # single image generally has neither signal across most cells.
+    has_grid_signal = seam_score >= 0.045 or background_score >= 0.82
+    if not has_grid_signal:
+        return -1.0
+    return (
+        content_ratio
+        + (0.45 if seam_score >= 0.045 else 0.0)
+        + (0.30 if background_score >= 0.82 else 0.0)
+        + (0.15 if content_count == frame_count else 0.0)
+    )
+
+
+def split_contact_sheet_bytes(image_bytes: bytes, frame_count: int) -> List[bytes]:
+    """Split a model-returned contact sheet into individual PNG frames.
+
+    Image APIs normally return one item per frame, but some compatible gateways
+    turn ``n=8`` into a single 4x2 preview sheet.  The splitter only activates
+    when grid seams and per-cell content both look like a collage; otherwise it
+    returns the original bytes unchanged.
+    """
+
+    if frame_count <= 1:
+        return [image_bytes]
+    grids = _contact_sheet_grids(frame_count)
+    if not grids:
+        return [image_bytes]
+
+    from PIL import Image
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = source.convert("RGBA")
+            candidates = []
+            for columns, rows in grids:
+                tile_width = image.width // columns
+                tile_height = image.height // rows
+                if min(tile_width, tile_height) < 96:
+                    continue
+                score = _contact_sheet_score(image, columns, rows, frame_count)
+                if score >= 0.0:
+                    candidates.append((score, columns, rows))
+            if not candidates:
+                return [image_bytes]
+
+            _, columns, rows = max(candidates)
+
+            frames: List[bytes] = []
+            for index in range(frame_count):
+                row, column = divmod(index, columns)
+                output = BytesIO()
+                image.crop(_contact_sheet_tile_bounds(image, columns, rows, column, row)).save(
+                    output,
+                    format="PNG",
+                )
+                frames.append(output.getvalue())
+            return frames
+    except Exception:
+        return [image_bytes]
 
 
 def _paste_subject(canvas, image, padding: int, anchor: str):

@@ -108,13 +108,12 @@
           </label>
           <p class="hint">第一张作为身份锚点；建议再上传侧面、站立和趴下等姿态，AI 会按姿态计划生成走动/睡觉循环并尽量保持毛色、比例和落地基线一致。</p>
 
-          <label class="check">
-            <input id="build-exe" name="build_exe" type="checkbox" checked />
-            同时请求生成 Windows exe
-          </label>
-          <p class="hint">服务器为 Linux Docker 时，需要在线的 Windows Worker 完成最终 exe 打包。</p>
+          <p class="hint">先生成资源包；资源完成后可单独请求 Windows Worker 打包 exe。服务器为 Linux Docker 时，需要在线的 Windows Worker 完成第二步。</p>
 
-          <button id="submit" type="submit">开始生成</button>
+          <div class="form-actions">
+            <button id="submit" type="submit">第一步：生成资源</button>
+            <button id="build-exe-button" class="secondary" type="button" disabled>第二步：打包 Windows exe</button>
+          </div>
         </form>
 
         <div id="progress" class="progress hidden">

@@ -31,6 +31,7 @@ input[type="file"], input[type="text"], input[type="url"], input[type="password"
 button, .download { display: inline-block; border: 0; border-radius: 999px; padding: 13px 22px; background: #b96843; color: #fff; font-weight: 700; font-size: 15px; cursor: pointer; text-decoration: none; }
 button.secondary { background: #81766c; padding: 10px 16px; font-size: 13px; }
 button:disabled { opacity: .55; cursor: wait; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .progress { margin-top: 26px; padding-top: 22px; border-top: 1px solid #eee4db; }
 .progress-row { display: flex; justify-content: space-between; font-weight: 700; }
 .bar { height: 10px; margin-top: 12px; border-radius: 999px; background: #eee3d9; overflow: hidden; }

@@ -52,6 +52,8 @@ AI 生成会把用户图片发送到配置的图像服务；生产环境应补�
 
 如果服务器安装了 `rembg`，`REMOVE_BACKGROUND=true` 时会优先使用模型抠图；没有安装时会回退到简单背景连通区域移除，不会阻塞任务。
 
+某些兼容图像网关会把请求的 8 帧返回成一张 4×2/2×4 contact sheet。服务端会在归一化图片前拆分这种返回，避免把整张拼图当成单帧；已生成的旧资源包需要重新生成。PNG 本身是逐帧资源，浏览器或图片查看器不会自动播放，动画预览请运行资源包中的 `pet_runtime.py`，或运行打包后的 exe。
+
 ## Windows Worker
 
 Linux 容器不能直接用 PyInstaller 产出 Windows exe。请在一台 Windows 机器上安装 Python 3.11+：
