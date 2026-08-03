@@ -4,6 +4,8 @@
 
 现在同时包含 Docker 服务端版本：浏览器上传照片后，服务端可调用 AI 图像服务生成动作帧，再由 Windows Worker 完成最终 exe 打包。服务端说明见 [server/README.md](server/README.md)。
 
+Windows Worker 和 Windows + AI 交接步骤见 [WINDOWS_WORKER_HANDOFF.md](WINDOWS_WORKER_HANDOFF.md)。
+
 ## 已实现
 
 - 无需服务器即可处理照片，原始照片不会上传。

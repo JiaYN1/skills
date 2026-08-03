@@ -8,4 +8,5 @@ generated-pets/
 server/data/*
 !server/data/.gitkeep
 server/.env
+worker/.env
 worker/.venv/

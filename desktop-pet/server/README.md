@@ -55,3 +55,5 @@ python worker.py
 ```
 
 Worker 只通过带 token 的接口领取任务、下载资源包和上传 exe，不需要把 Windows 主机暴露给公网以外的端口。建议用 Windows 任务计划程序或 NSSM 将 Worker 作为后台服务运行。
+
+Windows 端安装脚本、连接自检和 AI 交接提示见项目根目录的 [WINDOWS_WORKER_HANDOFF.md](../WINDOWS_WORKER_HANDOFF.md)。

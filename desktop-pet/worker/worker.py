@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+import argparse
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,11 +21,23 @@ POLL_SECONDS = max(2, int(os.getenv("POLL_SECONDS", "5")))
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Windows desktop-pet build worker")
+    parser.add_argument("--check", action="store_true", help="check server and worker authentication, then exit")
+    args = parser.parse_args()
+
     if not WORKER_TOKEN:
         raise SystemExit("请设置 WORKER_TOKEN")
+    if args.check:
+        check_connection()
+        return
     print(f"Windows Worker 已启动：{SERVER_URL}")
     while True:
-        job = claim_job()
+        try:
+            job = claim_job()
+        except Exception as error:
+            print(f"连接服务器失败：{error}")
+            time.sleep(POLL_SECONDS)
+            continue
         if not job:
             time.sleep(POLL_SECONDS)
             continue
@@ -44,6 +56,19 @@ def claim_job():
     )
     response.raise_for_status()
     return response.json().get("job")
+
+
+def check_connection() -> None:
+    health = requests.get(f"{SERVER_URL}/healthz", timeout=30)
+    health.raise_for_status()
+    worker = requests.get(
+        f"{SERVER_URL}/api/worker/jobs/next",
+        headers=headers(),
+        timeout=30,
+    )
+    worker.raise_for_status()
+    print(f"服务器连接正常：{health.json()}")
+    print(f"Worker 鉴权正常，当前任务：{worker.json().get('job') or '无待处理任务'}")
 
 
 def process_job(job) -> None:
@@ -136,4 +161,3 @@ def headers():
 
 if __name__ == "__main__":
     main()
-
