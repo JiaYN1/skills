@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI 宠物桌面生成器</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">AI DESKTOP PET</p>
+        <h1>把你的宠物带到 Windows 桌面</h1>
+        <p class="subtitle">上传几张照片，生成待机、走动、睡觉和点击互动动作。</p>
+      </section>
+
+      <details class="card settings-card">
+        <summary>AI 配置（管理员）</summary>
+        <div class="settings-body">
+          <p class="hint">API Key 只会提交到服务端，不会返回给浏览器；需要服务器配置的 ADMIN_TOKEN。</p>
+          <label>
+            管理令牌
+            <input id="admin-token" type="password" autocomplete="off" placeholder="输入 ADMIN_TOKEN" />
+          </label>
+          <div class="settings-actions">
+            <button id="load-ai-settings" class="secondary" type="button">读取当前配置</button>
+            <span id="ai-settings-status" class="settings-status"></span>
+          </div>
+
+          <form id="ai-settings-form" class="settings-form">
+            <label class="check">
+              <input id="ai-enabled" type="checkbox" />
+              启用 AI 动作帧生成
+            </label>
+            <label>
+              AI API 地址
+              <input id="ai-base-url" type="url" placeholder="https://api.openai.com/v1" />
+            </label>
+            <label>
+              图像模型
+              <input id="ai-model" type="text" placeholder="gpt-image-1" />
+            </label>
+            <label>
+              API Key
+              <input id="ai-key" type="password" autocomplete="new-password" placeholder="留空表示保持现有 Key" />
+            </label>
+            <div class="settings-grid">
+              <label>
+                每个动作帧数
+                <input id="ai-frame-count" type="number" min="1" max="8" />
+              </label>
+              <label>
+                参考图数量
+                <input id="ai-max-references" type="number" min="1" max="4" />
+              </label>
+              <label>
+                超时（秒）
+                <input id="ai-timeout" type="number" min="30" max="900" />
+              </label>
+            </div>
+            <label class="check">
+              <input id="ai-remove-background" type="checkbox" />
+              对 AI 输出尝试自动抠图
+            </label>
+            <label class="check warning-check">
+              <input id="ai-clear-key" type="checkbox" />
+              清除服务端已保存的 API Key
+            </label>
+            <button id="save-ai-settings" type="submit">保存 AI 配置</button>
+          </form>
+        </div>
+      </details>
+
+      <section class="card">
+        <form id="pet-form">
+          <label>
+            宠物名称
+            <input id="pet-name" name="name" value="我的宠物" maxlength="80" required />
+          </label>
+
+          <label>
+            宠物照片（最多 8 张）
+            <input id="photos" name="photos" type="file" accept="image/*" multiple required />
+          </label>
+          <p class="hint">建议上传正面、侧面、站立和趴下等不同姿态。AI 会尽量保持毛色和外形一致。</p>
+
+          <label class="check">
+            <input id="build-exe" name="build_exe" type="checkbox" checked />
+            同时请求生成 Windows exe
+          </label>
+          <p class="hint">服务器为 Linux Docker 时，需要在线的 Windows Worker 完成最终 exe 打包。</p>
+
+          <button id="submit" type="submit">开始生成</button>
+        </form>
+
+        <div id="progress" class="progress hidden">
+          <div class="progress-row"><span id="status">准备中</span><span id="percent">0%</span></div>
+          <div class="bar"><div id="bar-fill"></div></div>
+          <p id="message" class="hint"></p>
+          <a id="download" class="download hidden" href="#">下载生成结果</a>
+        </div>
+      </section>
+
+      <p class="footer">AI 生成会将照片发送到你配置的图像服务。请先确认服务商的隐私政策。</p>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

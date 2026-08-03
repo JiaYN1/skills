@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+generated-pets/
+*.spec
+server/data/*
+!server/data/.gitkeep
+server/.env
+worker/.venv/

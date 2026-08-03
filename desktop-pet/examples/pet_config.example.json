@@ -1,0 +1,14 @@
+{
+  "name": "我的宠物",
+  "scale": 1.0,
+  "speed": 2.2,
+  "always_on_top": true,
+  "sleep_after_seconds": 60,
+  "assets": {
+    "idle": ["assets/idle_0.png"],
+    "walk": ["assets/walk_0.png", "assets/walk_1.png"],
+    "sleep": ["assets/sleep_0.png"],
+    "react": ["assets/react_0.png"]
+  }
+}
+
