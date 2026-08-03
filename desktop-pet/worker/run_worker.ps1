@@ -5,10 +5,10 @@ $EnvFile = Join-Path $WorkerRoot ".env"
 $Python = Join-Path $WorkerRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $EnvFile)) {
-    throw "找不到 worker/.env。请先运行 .\install_worker.ps1。"
+    throw "worker/.env was not found. Run .\install_worker.ps1 first."
 }
 if (-not (Test-Path $Python)) {
-    throw "找不到虚拟环境。请先运行 .\install_worker.ps1。"
+    throw "Worker virtual environment was not found. Run .\install_worker.ps1 first."
 }
 
 Get-Content $EnvFile | ForEach-Object {
@@ -23,4 +23,3 @@ Get-Content $EnvFile | ForEach-Object {
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
-

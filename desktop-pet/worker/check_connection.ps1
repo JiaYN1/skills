@@ -5,7 +5,7 @@ $EnvFile = Join-Path $WorkerRoot ".env"
 $Python = Join-Path $WorkerRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $EnvFile) -or -not (Test-Path $Python)) {
-    throw "请先运行 .\install_worker.ps1。"
+    throw "Run .\install_worker.ps1 first."
 }
 
 Get-Content $EnvFile | ForEach-Object {
@@ -20,4 +20,3 @@ Get-Content $EnvFile | ForEach-Object {
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
-

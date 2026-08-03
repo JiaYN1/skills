@@ -141,6 +141,14 @@ def worker_next(x_worker_token: Optional[str] = Header(default=None)) -> Dict[st
     }
 
 
+@app.get("/api/worker/healthz")
+def worker_healthz(x_worker_token: Optional[str] = Header(default=None)) -> Dict[str, bool]:
+    """Validate a Worker token without claiming a queued build job."""
+
+    _verify_worker(x_worker_token)
+    return {"ok": True}
+
+
 @app.get("/api/worker/jobs/{job_id}/source")
 def worker_source(job_id: str, x_worker_token: Optional[str] = Header(default=None)):
     _verify_worker(x_worker_token)

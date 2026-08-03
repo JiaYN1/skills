@@ -3,20 +3,39 @@ $ErrorActionPreference = "Stop"
 $WorkerRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $WorkerRoot
 
-if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    throw "找不到 Python Launcher。请先安装 Python 3.11+，并勾选 Add Python to PATH。"
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    py -3.11 -m venv .venv
+} else {
+    $PythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $PythonCommand) {
+        throw "Python 3.11+ was not found. Install Python and add it to PATH."
+    }
+    $BasePython = $PythonCommand.Source
+    $PythonVersion = & $BasePython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    if ([version]$PythonVersion -lt [version]"3.11") {
+        throw "Python 3.11+ is required; found $PythonVersion."
+    }
+    Write-Host "Python Launcher was not found; using $BasePython" -ForegroundColor Yellow
+    & $BasePython -m venv .venv
 }
 
-py -3.11 -m venv .venv
-& "$WorkerRoot\.venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$WorkerRoot\.venv\Scripts\python.exe" -m pip install -r requirements.txt
+$Python = Join-Path $WorkerRoot ".venv\Scripts\python.exe"
+$PreviousPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$null = & $Python -c "from tkinter import Tcl; Tcl()" 2>$null
+$TkExitCode = $LASTEXITCODE
+$ErrorActionPreference = $PreviousPreference
+if ($TkExitCode -ne 0) {
+    throw "Tkinter is unavailable or incomplete. Install a Python 3.11+ distribution with Tcl/Tk support before building desktop-pet executables."
+}
+& $Python -m pip install --upgrade pip
+& $Python -m pip install -r requirements.txt
 
 if (-not (Test-Path "$WorkerRoot\.env")) {
     Copy-Item "$WorkerRoot\.env.example" "$WorkerRoot\.env"
-    Write-Host "已创建 worker/.env，请填写 PET_SERVER_URL 和 WORKER_TOKEN。" -ForegroundColor Yellow
+    Write-Host "Created worker/.env. Set PET_SERVER_URL and WORKER_TOKEN before starting the worker." -ForegroundColor Yellow
 } else {
-    Write-Host "worker/.env 已存在，未覆盖。" -ForegroundColor Green
+    Write-Host "worker/.env already exists; it was not overwritten." -ForegroundColor Green
 }
 
-Write-Host "安装完成。下一步运行 .\check_connection.ps1。" -ForegroundColor Green
-
+Write-Host "Installation complete. Next run .\check_connection.ps1." -ForegroundColor Green

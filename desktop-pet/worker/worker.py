@@ -62,13 +62,13 @@ def check_connection() -> None:
     health = requests.get(f"{SERVER_URL}/healthz", timeout=30)
     health.raise_for_status()
     worker = requests.get(
-        f"{SERVER_URL}/api/worker/jobs/next",
+        f"{SERVER_URL}/api/worker/healthz",
         headers=headers(),
         timeout=30,
     )
     worker.raise_for_status()
     print(f"服务器连接正常：{health.json()}")
-    print(f"Worker 鉴权正常，当前任务：{worker.json().get('job') or '无待处理任务'}")
+    print("Worker 鉴权正常")
 
 
 def process_job(job) -> None:
