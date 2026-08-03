@@ -14,6 +14,8 @@ Windows Worker 和 Windows + AI 交接步骤见 [WINDOWS_WORKER_HANDOFF.md](WIND
 - 右键菜单：立即睡觉、恢复活动、退出。
 - 支持一张照片起步，也支持多张照片作为动作/备用帧。
 - 可选 `rembg` 模型抠图；没有安装时使用轻量的纯色背景抠除兜底。
+- 统一的身份参考图、透明化、落地基线和主体比例处理，减少不同动作帧漂移。
+- 服务端可按动作生成 8-12 张有序走动/睡觉 PNG，并导出 `animation.json` 与可选 `skeleton.json`。
 - Windows 上通过 PyInstaller 生成包含资源的单文件 exe。
 
 ## Windows 上运行
@@ -52,7 +54,7 @@ PyInstaller 不能可靠地把 Python 程序从 Linux 交叉编译成 Windows ex
 4. 点击反应
 5-8. 走动备用帧
 
-只有一张照片也能工作，因为其他动作会在同一张照片上叠加轻微的缩放、上下浮动和旋转。为了获得更自然的动画，建议照片主体完整、背景简单，并分别准备站立、侧身、趴下等姿态。
+只有一张照片也能工作，因为其他动作会在同一张照片上叠加轻微的缩放、上下浮动和旋转；资源包还会保存一个可复用的 2D 骨骼时间线。为了获得更自然的动画，建议照片主体完整、背景简单，并分别准备站立、侧身、趴下等姿态。
 
 生成完成后，可以先预览资源包：
 
@@ -60,12 +62,38 @@ PyInstaller 不能可靠地把 Python 程序从 Linux 交叉编译成 Windows ex
 python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 ```
 
+## AI 动作帧与输出格式
+
+服务端页面的“AI 配置（管理员）”支持：
+
+- 对输入照片和 AI 输出调用 `rembg`（未安装时自动使用轻量边缘背景兜底）。
+- 把第一张照片作为身份锚点，把其余照片作为动作参考，并在提示词中锁定毛色、脸部、比例、镜头、主体缩放和落地基线。
+- 独立设置走动/睡觉帧数（最多 12）、播放 FPS 和动作输出格式。
+
+默认 `hybrid` 模式会同时包含：
+
+- `assets/walk_*.png`、`assets/sleep_*.png` 等透明逐帧 PNG；
+- `animation.json`：动作顺序、FPS、循环信息和姿态计划；
+- `skeleton.json`：引擎无关的 2D 骨骼时间线。照片宠物使用 sprite-backed root rig，PNG 仍是视觉真值，便于后续接入 Spine/DragonBones/自研蒙皮渲染器。
+
+如果只需要位图，可选择 `png`；如果只需要骨骼清单，可选择 `skeleton`。没有 AI 或 AI 失败时，资源包仍会使用照片和同一套骨骼/程序化动画兜底。
+
+常用环境变量：
+
+```dotenv
+REMOVE_BACKGROUND=true
+POSE_CONSISTENCY=true
+ANIMATION_MODE=hybrid
+ANIMATION_FPS=10
+WALK_FRAME_COUNT=8
+SLEEP_FRAME_COUNT=8
+```
+
 ## 后续产品化方向
 
-当前版本解决的是“能生成、能运行、能互动”的 MVP。若要达到商业产品质量，下一步应加入：
+当前版本已经覆盖“能生成、能运行、能互动”的动画 MVP。后续可继续加入：
 
-- AI 背景移除和姿态一致性处理。
-- 根据照片生成更完整的走路/睡觉逐帧 PNG 或 2D 骨骼动画。
+- 关键点/分割模型，把身体部位拆成真正可蒙皮的骨骼图层；
 - 自定义行为编辑器、语音互动和系统托盘菜单。
 - 生成任务队列、云端上传和下载链接（如果改成网站服务）。
 - Windows 签名、自动更新和杀毒软件误报处理。

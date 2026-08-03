@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 
 from .config import Settings
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from pet_animation import frame_count_for_role, pose_plan_for  # noqa: E402
 
 
 ROLE_PROMPTS = {
@@ -41,14 +49,31 @@ class OpenAICompatibleImageProvider:
         references: List[Path],
         role: str,
         output_dir: Path,
+        identity_reference: Optional[Path] = None,
+        frame_count: Optional[int] = None,
+        pose_consistency: Optional[bool] = None,
     ) -> List[Path]:
         if not self.available:
             return []
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        prompt = self._prompt_for(role)
-        reference_paths = references[: self.settings.ai_max_references]
-        response = await self._request(prompt, reference_paths)
+        configured_count = frame_count
+        if configured_count is None:
+            role_count = getattr(self.settings, "frame_count_for_role", None)
+            configured_count = role_count(role) if callable(role_count) else self.settings.ai_frame_count
+        count = frame_count_for_role(role, configured_count)
+        prompt = self._prompt_for(
+            role,
+            frame_count=count,
+            pose_consistency=(
+                getattr(self.settings, "pose_consistency", True)
+                if pose_consistency is None
+                else bool(pose_consistency)
+            ),
+        )
+        reference_paths = self._reference_paths(references, identity_reference)
+        reference_paths = reference_paths[: self.settings.ai_max_references]
+        response = await self._request(prompt, reference_paths, frame_count=count)
         payload = response.json()
         items = payload.get("data") or payload.get("images") or []
         if not isinstance(items, list):
@@ -65,14 +90,30 @@ class OpenAICompatibleImageProvider:
                 output_paths.append(target)
         return output_paths
 
-    async def _request(self, prompt: str, references: List[Path]) -> httpx.Response:
+    @staticmethod
+    def _reference_paths(references: List[Path], identity_reference: Optional[Path]) -> List[Path]:
+        """Put the identity anchor first and remove duplicate reference files."""
+
+        result: List[Path] = []
+        for path in ([identity_reference] if identity_reference else []) + list(references):
+            if path is not None and path not in result:
+                result.append(path)
+        return result
+
+    async def _request(
+        self,
+        prompt: str,
+        references: List[Path],
+        frame_count: Optional[int] = None,
+    ) -> httpx.Response:
         endpoint = "/images/edits" if references else "/images/generations"
         url = f"{self.settings.ai_api_base_url}{endpoint}"
         headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
+        count = max(1, min(12, int(frame_count or self.settings.ai_frame_count)))
         base_data = {
             "model": self.settings.ai_image_model,
             "prompt": prompt,
-            "n": str(self.settings.ai_frame_count),
+            "n": count,
             "size": "1024x1024",
         }
 
@@ -80,7 +121,8 @@ class OpenAICompatibleImageProvider:
         # OpenAI-compatible gateway. Retry with the minimal shape if rejected.
         attempts = [
             dict(base_data, background="transparent", output_format="png"),
-            dict(base_data, n="1"),
+            dict(base_data, background="transparent"),
+            dict(base_data, n=1),
         ]
         last_error = "未知错误"
         async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
@@ -117,14 +159,34 @@ class OpenAICompatibleImageProvider:
         return b""
 
     @staticmethod
-    def _prompt_for(role: str) -> str:
+    def _prompt_for(
+        role: str,
+        frame_count: int = 8,
+        pose_consistency: bool = True,
+    ) -> str:
         action = ROLE_PROMPTS.get(role, ROLE_PROMPTS["idle"])
-        return (
-            "Create a consistent 2D desktop-pet sprite of the exact same pet shown in the reference image. "
-            "Preserve the species, fur or feather colors, markings, face, ears, tail, body proportions, "
-            "and overall identity. Show the pet full body, centered, in a clean game-sprite style, "
-            f"with the action: {action}. "
-            "Use a fully transparent background, clean anti-aliased edges, no text, no frame, no room, "
-            "no people, no watermark, and no extra animals."
+        count = frame_count_for_role(role, frame_count)
+        plan = pose_plan_for(role, count)
+        sequence = "; ".join(
+            f"frame {index + 1}: {pose}"
+            for index, pose in enumerate(plan)
         )
-
+        consistency = (
+            "Lock identity and proportions to the first identity reference before changing only the pose. "
+            "Keep the same face, markings, fur or feather pattern, ear shape, tail shape, camera angle, "
+            "lighting direction, crop, scale, and ground contact across every frame."
+            if pose_consistency
+            else "Keep the animal recognizable and full-body in every frame."
+        )
+        return (
+            "Use case: identity-preserve. Asset type: a frame-by-frame 2D desktop-pet animation. "
+            "Input images: Image 1 is the identity reference; later images are pose references only. "
+            "Create exactly the same pet shown in the reference images. "
+            f"{consistency} "
+            "Show the pet full body, centered, in a clean game-sprite style, with transparent background. "
+            f"The action is {action}. Generate exactly {count} separate PNG frames, in order, not a contact sheet. "
+            f"The ordered pose plan is: {sequence}. "
+            "Use a fully transparent background or a perfectly flat removable green background if the service "
+            "cannot return alpha. Keep clean anti-aliased edges, no text, no frame, no room, no people, "
+            "no watermark, no shadow, and no extra animals."
+        )

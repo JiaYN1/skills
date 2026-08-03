@@ -9,6 +9,19 @@
     "walk": ["assets/walk_0.png", "assets/walk_1.png"],
     "sleep": ["assets/sleep_0.png"],
     "react": ["assets/react_0.png"]
+  },
+  "animation": {
+    "format": "desktop-pet-animation",
+    "version": 1,
+    "mode": "hybrid",
+    "fps": 10,
+    "skeleton_path": "skeleton.json",
+    "sequences": {
+      "walk": {
+        "loop": true,
+        "fps": 10,
+        "frames": ["assets/walk_0.png", "assets/walk_1.png"]
+      }
+    }
   }
 }
-

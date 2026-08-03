@@ -1,5 +1,4 @@
 Pillow>=10.0,<13
 PyInstaller>=6.0,<7
 # 可选：使用模型进行更好的自动抠图
-# rembg>=2.0
-
+# rembg[cpu]>=2.0,<3

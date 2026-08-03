@@ -33,6 +33,11 @@ class AISettingsUpdate(BaseModel):
     max_references: Optional[int] = Field(default=None, ge=1, le=4)
     timeout_seconds: Optional[int] = Field(default=None, ge=30, le=900)
     remove_background: Optional[bool] = None
+    pose_consistency: Optional[bool] = None
+    animation_mode: Optional[str] = None
+    animation_fps: Optional[int] = Field(default=None, ge=1, le=60)
+    walk_frame_count: Optional[int] = Field(default=None, ge=1, le=12)
+    sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=12)
 
 if settings.cors_origins:
     app.add_middleware(
@@ -236,6 +241,7 @@ async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: 
             artifact_kind="zip",
             ai_frame_total=ai_frame_total,
             ai_error_count=result["ai_error_count"],
+            animation_mode=result.get("animation_mode", settings.animation_mode),
         )
     except Exception as error:
         store.update(job_id, status="failed", progress=0, message=str(error)[-4000:], error=str(error)[-4000:])

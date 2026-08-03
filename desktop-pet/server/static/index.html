@@ -46,7 +46,7 @@
             </label>
             <div class="settings-grid">
               <label>
-                每个动作帧数
+                基础动作帧数
                 <input id="ai-frame-count" type="number" min="1" max="8" />
               </label>
               <label>
@@ -57,10 +57,34 @@
                 超时（秒）
                 <input id="ai-timeout" type="number" min="30" max="900" />
               </label>
+              <label>
+                走动帧数
+                <input id="ai-walk-frame-count" type="number" min="1" max="12" />
+              </label>
+              <label>
+                睡觉帧数
+                <input id="ai-sleep-frame-count" type="number" min="1" max="12" />
+              </label>
+              <label>
+                播放 FPS
+                <input id="ai-animation-fps" type="number" min="1" max="60" />
+              </label>
             </div>
+            <label>
+              动画输出格式
+              <select id="ai-animation-mode">
+                <option value="hybrid">hybrid：PNG + 2D 骨骼（推荐）</option>
+                <option value="png">PNG 逐帧</option>
+                <option value="skeleton">2D 骨骼清单</option>
+              </select>
+            </label>
+            <label class="check">
+              <input id="ai-pose-consistency" type="checkbox" />
+              锁定身份、比例、镜头和落地基线，减少动作帧漂移
+            </label>
             <label class="check">
               <input id="ai-remove-background" type="checkbox" />
-              对 AI 输出尝试自动抠图
+              对输入和 AI 输出尝试自动抠图（rembg 不可用时使用轻量兜底）
             </label>
             <label class="check warning-check">
               <input id="ai-clear-key" type="checkbox" />
@@ -82,7 +106,7 @@
             宠物照片（最多 8 张）
             <input id="photos" name="photos" type="file" accept="image/*" multiple required />
           </label>
-          <p class="hint">建议上传正面、侧面、站立和趴下等不同姿态。AI 会尽量保持毛色和外形一致。</p>
+          <p class="hint">第一张作为身份锚点；建议再上传侧面、站立和趴下等姿态，AI 会按姿态计划生成走动/睡觉循环并尽量保持毛色、比例和落地基线一致。</p>
 
           <label class="check">
             <input id="build-exe" name="build_exe" type="checkbox" checked />

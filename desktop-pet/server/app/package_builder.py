@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pet_assets import normalize_pet_image
+from pet_animation import write_animation_bundle
 from pet_common import ROLES, assign_roles, safe_filename
 
 from .ai_provider import OpenAICompatibleImageProvider
@@ -19,6 +20,14 @@ from .config import Settings
 
 
 ProgressCallback = Callable[[int, str], None]
+
+
+ROLE_ANCHORS = {
+    "idle": "bottom",
+    "walk": "bottom",
+    "sleep": "center",
+    "react": "bottom",
+}
 
 
 async def build_pet_package(
@@ -40,7 +49,15 @@ async def build_pet_package(
     normalized_inputs: List[Path] = []
     for index, source in enumerate(input_paths):
         target = references_dir / f"reference_{index}.png"
-        normalize_pet_image(source, target, canvas_size=512, use_rembg=settings.remove_background)
+        normalize_pet_image(
+            source,
+            target,
+            canvas_size=512,
+            use_rembg=settings.remove_background,
+            background_mode="auto" if settings.remove_background else "simple",
+            anchor="center",
+            subject_scale=0.96,
+        )
         normalized_inputs.append(target)
 
     role_inputs = assign_roles(normalized_inputs)
@@ -51,25 +68,46 @@ async def build_pet_package(
     for role_index, role in enumerate(ROLES):
         progress(10 + role_index * 18, f"正在生成{_role_label(role)}动作")
         generated: List[Path] = []
+        role_frame_count = _frame_count_for(settings, role)
         try:
             generated = await provider.generate_action_frames(
                 role_inputs[role],
                 role,
                 ai_dir / role,
+                identity_reference=normalized_inputs[0],
+                frame_count=role_frame_count,
+                pose_consistency=getattr(settings, "pose_consistency", True),
             )
         except Exception as error:
             # Keep the job usable if a provider is temporarily unavailable.
             ai_error_count += 1
             progress(10 + role_index * 18, f"AI 生成失败，{_role_label(role)}使用照片动画：{error}")
 
-        sources = generated or [role_inputs[role][0]]
+        sources = generated or role_inputs[role] or [normalized_inputs[0]]
         ai_frame_total += len(generated)
         config_assets[role] = []
-        for frame_index, source in enumerate(sources[: settings.ai_frame_count]):
+        for frame_index, source in enumerate(sources[: role_frame_count]):
             filename = f"{role}_{frame_index}.png"
             destination = assets_dir / filename
-            normalize_pet_image(source, destination, canvas_size=320, use_rembg=settings.remove_background)
+            normalize_pet_image(
+                source,
+                destination,
+                canvas_size=320,
+                use_rembg=settings.remove_background,
+                background_mode="auto" if settings.remove_background else "simple",
+                anchor=ROLE_ANCHORS.get(role, "center"),
+                subject_scale=0.96,
+            )
             config_assets[role].append(f"assets/{filename}")
+
+    animation_mode = getattr(settings, "animation_mode", "hybrid")
+    animation_fps = getattr(settings, "animation_fps", 10)
+    animation_manifest = write_animation_bundle(
+        package_dir,
+        config_assets,
+        mode=animation_mode,
+        fps=animation_fps,
+    )
 
     config = {
         "name": name,
@@ -78,10 +116,14 @@ async def build_pet_package(
         "always_on_top": True,
         "sleep_after_seconds": 60,
         "assets": config_assets,
+        "animation": animation_manifest,
         "generation": {
             "provider": "openai-compatible" if ai_frame_total else "photo-fallback",
             "ai_frame_count": ai_frame_total,
             "ai_error_count": ai_error_count,
+            "frame_counts": {role: len(config_assets.get(role, [])) for role in ROLES},
+            "background_removal": bool(settings.remove_background),
+            "pose_consistency": bool(getattr(settings, "pose_consistency", True)),
         },
     }
     (package_dir / "pet_config.json").write_text(
@@ -92,7 +134,8 @@ async def build_pet_package(
     (package_dir / "README.txt").write_text(
         "AI 桌面宠物资源包\n"
         "预览：python pet_runtime.py --config pet_config.json\n"
-        "如果由 Windows Worker 打包，运行生成的 exe 即可。\n",
+        "如果由 Windows Worker 打包，运行生成的 exe 即可。\n"
+        "animation.json 保存 PNG 序列；hybrid/skeleton 模式还包含 skeleton.json。\n",
         encoding="utf-8",
     )
 
@@ -108,6 +151,7 @@ async def build_pet_package(
         "zip_path": zip_path,
         "ai_frame_total": ai_frame_total,
         "ai_error_count": ai_error_count,
+        "animation_mode": animation_manifest["mode"],
     }
 
 
@@ -118,3 +162,10 @@ def _role_label(role: str) -> str:
         "sleep": "睡觉",
         "react": "点击反应",
     }.get(role, role)
+
+
+def _frame_count_for(settings: Settings, role: str) -> int:
+    configured = getattr(settings, "frame_count_for_role", None)
+    if callable(configured):
+        return max(1, min(12, int(configured(role))))
+    return max(1, min(12, int(getattr(settings, "ai_frame_count", 8))))

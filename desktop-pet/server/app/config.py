@@ -22,6 +22,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _animation_mode(value: Any, default: str = "hybrid") -> str:
+    mode = str(value or default).strip().lower()
+    return mode if mode in {"png", "skeleton", "hybrid"} else default
+
+
 @dataclass
 class Settings:
     data_dir: Path
@@ -39,6 +44,11 @@ class Settings:
     worker_token: str
     admin_token: str
     cors_origins: str
+    pose_consistency: bool = True
+    animation_mode: str = "hybrid"
+    animation_fps: int = 10
+    walk_frame_count: int = 8
+    sleep_frame_count: int = 8
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -62,11 +72,16 @@ class Settings:
             ai_timeout_seconds=max(30, _env_int("AI_TIMEOUT_SECONDS", 180)),
             ai_frame_count=max(1, min(8, _env_int("AI_FRAME_COUNT", 4))),
             ai_max_references=max(1, min(4, _env_int("AI_MAX_REFERENCES", 2))),
-            remove_background=_env_bool("REMOVE_BACKGROUND", False),
+            remove_background=_env_bool("REMOVE_BACKGROUND", True),
             build_mode=build_mode,
             worker_token=os.getenv("WORKER_TOKEN", "").strip(),
             admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
             cors_origins=os.getenv("CORS_ORIGINS", "").strip(),
+            pose_consistency=_env_bool("POSE_CONSISTENCY", True),
+            animation_mode=_animation_mode(os.getenv("ANIMATION_MODE", "hybrid")),
+            animation_fps=max(1, min(60, _env_int("ANIMATION_FPS", 10))),
+            walk_frame_count=max(1, min(12, _env_int("WALK_FRAME_COUNT", 8))),
+            sleep_frame_count=max(1, min(12, _env_int("SLEEP_FRAME_COUNT", 8))),
         )
         result._load_runtime_overrides()
         return result
@@ -103,6 +118,16 @@ class Settings:
             self.ai_max_references = max(1, min(4, values["ai_max_references"]))
         if isinstance(values.get("remove_background"), bool):
             self.remove_background = values["remove_background"]
+        if isinstance(values.get("pose_consistency"), bool):
+            self.pose_consistency = values["pose_consistency"]
+        if isinstance(values.get("animation_mode"), str):
+            self.animation_mode = _animation_mode(values["animation_mode"])
+        if isinstance(values.get("animation_fps"), int):
+            self.animation_fps = max(1, min(60, values["animation_fps"]))
+        if isinstance(values.get("walk_frame_count"), int):
+            self.walk_frame_count = max(1, min(12, values["walk_frame_count"]))
+        if isinstance(values.get("sleep_frame_count"), int):
+            self.sleep_frame_count = max(1, min(12, values["sleep_frame_count"]))
 
     def _runtime_values(self) -> Dict[str, Any]:
         return {
@@ -114,6 +139,11 @@ class Settings:
             "ai_frame_count": self.ai_frame_count,
             "ai_max_references": self.ai_max_references,
             "remove_background": self.remove_background,
+            "pose_consistency": self.pose_consistency,
+            "animation_mode": self.animation_mode,
+            "animation_fps": self.animation_fps,
+            "walk_frame_count": self.walk_frame_count,
+            "sleep_frame_count": self.sleep_frame_count,
         }
 
     def _persist_runtime_values(self) -> None:
@@ -166,6 +196,16 @@ class Settings:
             self.ai_timeout_seconds = max(30, min(900, int(values["timeout_seconds"])))
         if values.get("remove_background") is not None:
             self.remove_background = bool(values["remove_background"])
+        if values.get("pose_consistency") is not None:
+            self.pose_consistency = bool(values["pose_consistency"])
+        if values.get("animation_mode") is not None:
+            self.animation_mode = _animation_mode(values["animation_mode"])
+        if values.get("animation_fps") is not None:
+            self.animation_fps = max(1, min(60, int(values["animation_fps"])))
+        if values.get("walk_frame_count") is not None:
+            self.walk_frame_count = max(1, min(12, int(values["walk_frame_count"])))
+        if values.get("sleep_frame_count") is not None:
+            self.sleep_frame_count = max(1, min(12, int(values["sleep_frame_count"])))
 
         self._persist_runtime_values()
         return self.ai_public()
@@ -184,7 +224,21 @@ class Settings:
             "frame_count": self.ai_frame_count,
             "max_references": self.ai_max_references,
             "remove_background": self.remove_background,
+            "pose_consistency": self.pose_consistency,
+            "animation_mode": self.animation_mode,
+            "animation_fps": self.animation_fps,
+            "walk_frame_count": self.walk_frame_count,
+            "sleep_frame_count": self.sleep_frame_count,
         }
+
+    def frame_count_for_role(self, role: str) -> int:
+        """Return the configured count for a role without coupling callers to UI names."""
+
+        if role == "walk":
+            return self.walk_frame_count
+        if role == "sleep":
+            return self.sleep_frame_count
+        return self.ai_frame_count
 
 
 settings = Settings.from_env()

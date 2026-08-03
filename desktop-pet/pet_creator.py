@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from pet_assets import normalize_pet_image
+from pet_animation import normalize_animation_mode, write_animation_bundle
 from pet_common import IMAGE_EXTENSIONS, ROLE_LABELS, ROLES, assign_roles, safe_filename, unique_directory
 
 
@@ -34,6 +35,7 @@ def create_package(
     pet_name: str,
     output_parent: Path,
     use_rembg: bool,
+    animation_mode: str = "hybrid",
 ) -> Path:
     """Create a self-contained, previewable pet package."""
 
@@ -54,8 +56,18 @@ def create_package(
                 destination,
                 canvas_size=320,
                 use_rembg=use_rembg,
+                background_mode="auto" if use_rembg else "simple",
+                anchor="center" if role == "sleep" else "bottom",
+                subject_scale=0.96,
             )
             config_assets[role].append(f"assets/{filename}")
+
+    animation_manifest = write_animation_bundle(
+        package_dir,
+        config_assets,
+        mode=normalize_animation_mode(animation_mode),
+        fps=10,
+    )
 
     config = {
         "name": pet_name.strip() or "我的宠物",
@@ -64,6 +76,7 @@ def create_package(
         "always_on_top": True,
         "sleep_after_seconds": 60,
         "assets": config_assets,
+        "animation": animation_manifest,
     }
     (package_dir / "pet_config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2),
@@ -73,7 +86,8 @@ def create_package(
     (package_dir / "README.txt").write_text(
         "这是一个可预览的桌面宠物资源包。\n"
         "运行预览：python pet_runtime.py --config pet_config.json\n"
-        "动作分配：第 1 张待机，第 2 张走动，第 3 张睡觉，第 4 张点击反应；更多照片会作为走动备用帧。\n",
+        "动作分配：第 1 张待机，第 2 张走动，第 3 张睡觉，第 4 张点击反应；更多照片会作为走动备用帧。\n"
+        "animation.json 保存逐帧信息；hybrid/skeleton 模式还包含 skeleton.json。\n",
         encoding="utf-8",
     )
     return package_dir
@@ -109,8 +123,12 @@ def build_exe(package_dir: Path, pet_name: str) -> Path:
         config_data,
         "--add-data",
         assets_data,
-        str(APP_ROOT / "pet_runtime.py"),
     ]
+    for metadata_name in ("animation.json", "skeleton.json"):
+        metadata_path = package_dir / metadata_name
+        if metadata_path.exists():
+            command.extend(["--add-data", f"{metadata_path}{separator}."])
+    command.append(str(APP_ROOT / "pet_runtime.py"))
     result = subprocess.run(
         command,
         cwd=APP_ROOT,
@@ -140,6 +158,7 @@ class CreatorApp(tk.Tk):
         self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
         self.use_rembg_var = tk.BooleanVar(value=False)
         self.build_exe_var = tk.BooleanVar(value=True)
+        self.animation_mode_var = tk.StringVar(value="hybrid")
         self.status_var = tk.StringVar(value="请选择 1-8 张照片。第一张作为待机动作。")
         self._build_ui()
 
@@ -199,6 +218,20 @@ class CreatorApp(tk.Tk):
             text="同时生成 Windows exe（需要在 Windows 环境安装 PyInstaller）",
             variable=self.build_exe_var,
         ).pack(anchor="w", pady=(5, 0))
+        animation_options = ttk.Frame(options)
+        animation_options.pack(fill="x", pady=(10, 0))
+        ttk.Label(animation_options, text="动画输出").pack(side="left")
+        ttk.Combobox(
+            animation_options,
+            textvariable=self.animation_mode_var,
+            values=("hybrid", "png", "skeleton"),
+            state="readonly",
+            width=12,
+        ).pack(side="left", padx=(10, 0))
+        ttk.Label(
+            animation_options,
+            text="hybrid 同时保存逐帧 PNG 与 2D 骨骼清单",
+        ).pack(side="left", padx=(10, 0))
 
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(16, 0))
@@ -269,13 +302,14 @@ class CreatorApp(tk.Tk):
             Path(self.output_var.get()).expanduser(),
             self.use_rembg_var.get(),
             self.build_exe_var.get(),
+            self.animation_mode_var.get(),
         )
         threading.Thread(target=self._generate_worker, args=(arguments,), daemon=True).start()
 
     def _generate_worker(self, arguments):
-        photos, name, output, use_rembg, should_build = arguments
+        photos, name, output, use_rembg, should_build, animation_mode = arguments
         try:
-            package_dir = create_package(photos, name, output, use_rembg)
+            package_dir = create_package(photos, name, output, use_rembg, animation_mode)
             executable = None
             if should_build:
                 self.after(0, lambda: self.status_var.set("资源已生成，正在调用 PyInstaller 打包……"))

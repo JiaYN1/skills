@@ -123,8 +123,12 @@ def build_exe(package: Path, pet_name: str) -> Path:
         f"{package / 'pet_config.json'};.",
         "--add-data",
         f"{package / 'assets'};assets",
-        str(package / "pet_runtime.py"),
     ]
+    for metadata_name in ("animation.json", "skeleton.json"):
+        metadata_path = package / metadata_name
+        if metadata_path.exists():
+            command.extend(["--add-data", f"{metadata_path};."])
+    command.append(str(package / "pet_runtime.py"))
     subprocess.run(command, cwd=str(package), check=True)
     executable = dist / f"{safe_name}.exe"
     if not executable.exists():

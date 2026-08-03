@@ -18,7 +18,7 @@ h1 { margin: 8px 0 12px; font-size: clamp(32px, 6vw, 54px); line-height: 1.05; }
 .settings-body { margin-top: 22px; }
 label { display: block; margin: 0 0 18px; font-weight: 700; }
 input[type="text"], input:not([type]) { display: block; }
-input[type="file"], input[type="text"], input[type="url"], input[type="password"], input[type="number"], input:not([type]) { width: 100%; margin-top: 8px; padding: 12px; border: 1px solid #d9cec4; border-radius: 10px; background: #fff; font: inherit; }
+input[type="file"], input[type="text"], input[type="url"], input[type="password"], input[type="number"], input:not([type]), select { width: 100%; margin-top: 8px; padding: 12px; border: 1px solid #d9cec4; border-radius: 10px; background: #fff; font: inherit; }
 .check { display: flex; gap: 9px; align-items: center; font-weight: 600; }
 .check input { width: 17px; height: 17px; }
 .warning-check { color: #a94f3d; }

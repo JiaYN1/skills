@@ -3,4 +3,5 @@ httpx>=0.27,<1
 Pillow>=10,<13
 python-multipart>=0.0.9,<1
 uvicorn[standard]>=0.30,<1
-
+# Optional model-based background removal (install separately when needed):
+# rembg[cpu]>=2.0,<3

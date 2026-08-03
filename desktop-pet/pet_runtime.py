@@ -24,6 +24,7 @@ class PetConfig:
         always_on_top: bool,
         sleep_after_seconds: int,
         assets: Dict[str, List[str]],
+        animation: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.scale = scale
@@ -31,6 +32,7 @@ class PetConfig:
         self.always_on_top = always_on_top
         self.sleep_after_seconds = sleep_after_seconds
         self.assets = assets
+        self.animation = animation or {}
 
     @classmethod
     def from_file(cls, path: Path) -> "PetConfig":
@@ -45,6 +47,10 @@ class PetConfig:
                 str(role): [str(item) for item in items]
                 for role, items in (data.get("assets") or {}).items()
                 if isinstance(items, list)
+            },
+            animation={
+                str(key): value
+                for key, value in (data.get("animation") or {}).items()
             },
         )
 
@@ -81,6 +87,13 @@ class PetWindow:
         self.ImageTk = ImageTk
         self.config = config
         self.base_dir = base_dir
+        self.animation_mode = str(config.animation.get("mode") or "hybrid").lower()
+        try:
+            self.animation_fps = max(1.0, min(60.0, float(config.animation.get("fps", 10))))
+        except (TypeError, ValueError):
+            self.animation_fps = 10.0
+        self.frame_interval = 1.0 / self.animation_fps
+        self.next_frame_at = 0.0
         self.root = tk.Tk()
         self.root.title(config.name)
         self.root.overrideredirect(True)
@@ -106,6 +119,7 @@ class PetWindow:
         )
         self.canvas.pack(fill="both", expand=True)
 
+        self.skeleton_manifest = self._load_skeleton_manifest()
         self.frames = self._load_animation_frames()
         self.state = "idle"
         self.state_started = time.monotonic()
@@ -162,6 +176,19 @@ class PetWindow:
         if not sources["idle"]:
             raise FileNotFoundError("配置中没有可用的宠物 PNG 资源")
         return sources
+
+    def _load_skeleton_manifest(self) -> Dict[str, Any]:
+        relative_path = self.config.animation.get("skeleton_path")
+        if not relative_path:
+            return {}
+        path = self._resolve_asset(str(relative_path))
+        if not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
     @staticmethod
     def _paste_center(canvas, image, y_offset: int = 0):
@@ -224,15 +251,84 @@ class PetWindow:
         self._paste_center(canvas, resized, -round((amount - 1) * 18))
         return canvas
 
+    def _skeleton_frame(self, source, state: str, step: int):
+        """Apply the root bone timeline to a base sprite when skeleton mode is active."""
+
+        animations = self.skeleton_manifest.get("animations")
+        if not isinstance(animations, dict):
+            return None
+        sequence = animations.get(state)
+        if not isinstance(sequence, dict):
+            return None
+        frames = sequence.get("frames")
+        if not isinstance(frames, list) or not frames:
+            return None
+        record = frames[step % len(frames)]
+        if not isinstance(record, dict):
+            return None
+        bones = record.get("bones")
+        root = bones.get("root") if isinstance(bones, dict) else None
+        if not isinstance(root, dict):
+            return None
+
+        source = self._fit_image(source)
+        width, height = source.size
+        try:
+            scale_x = max(0.5, min(1.6, float(root.get("scale_x", 1.0))))
+            scale_y = max(0.5, min(1.6, float(root.get("scale_y", 1.0))))
+            rotation = float(root.get("rotation", 0.0))
+            y_offset = round(float(root.get("y", 0.0)))
+        except (TypeError, ValueError):
+            return None
+        resized = source.resize(
+            (max(1, round(width * scale_x)), max(1, round(height * scale_y))),
+            self.Image.Resampling.LANCZOS,
+        )
+        rotated = resized.rotate(
+            rotation,
+            resample=self.Image.Resampling.BICUBIC,
+            expand=False,
+        )
+        canvas = self.Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        self._paste_center(canvas, rotated, y_offset)
+        return canvas
+
+    def _frame_count(self, role: str, source_count: int) -> int:
+        if source_count > 1:
+            return source_count
+        defaults = {"idle": 8, "walk": 8, "sleep": 8, "react": 6}
+        sequences = self.config.animation.get("sequences", {})
+        sequence = sequences.get(role, {}) if isinstance(sequences, dict) else {}
+        if isinstance(sequence, dict):
+            configured = sequence.get("fallback_frame_count")
+            if configured:
+                try:
+                    return max(1, min(12, int(configured)))
+                except (TypeError, ValueError):
+                    pass
+        return defaults.get(role, 8)
+
     def _load_animation_frames(self) -> Dict[str, List[Any]]:
         sources = self._source_images()
         frames: Dict[str, List[Any]] = {}
         for role in ("idle", "walk", "sleep", "react"):
             role_sources = sources[role]
-            frames[role] = [
-                self.ImageTk.PhotoImage(self._animation_frame(role_sources[index % len(role_sources)], role, index))
-                for index in range(8 if role != "react" else 6)
-            ]
+            frame_count = self._frame_count(role, len(role_sources))
+            rendered = []
+            for index in range(frame_count):
+                source = role_sources[index % len(role_sources)]
+                if self.animation_mode in {"skeleton", "hybrid"} and self.skeleton_manifest:
+                    skeleton_frame = self._skeleton_frame(source, role, index)
+                else:
+                    skeleton_frame = None
+                if skeleton_frame is not None and self.animation_mode == "skeleton":
+                    image = skeleton_frame
+                elif len(role_sources) > 1:
+                    image = self._fit_image(source)
+                else:
+                    image = self._animation_frame(source, role, index)
+                rendered.append(self.ImageTk.PhotoImage(image))
+            frames[role] = rendered
         return frames
 
     def _build_menu(self):
@@ -252,6 +348,7 @@ class PetWindow:
         self.state_started = time.monotonic()
         self.state_duration = duration
         self.frame_index = 0
+        self.next_frame_at = 0.0
 
     def _on_press(self, event):
         self.drag_start = (event.x_root, event.y_root, round(self.x), round(self.y))
@@ -316,7 +413,13 @@ class PetWindow:
         self.canvas.delete("pet")
         self.canvas.create_image(0, 0, anchor="nw", image=frame, tags="pet")
         self.photo_image = frame
-        self.frame_index += 1
+        if self.next_frame_at <= 0.0:
+            self.next_frame_at = now + self.frame_interval
+        elif now >= self.next_frame_at:
+            elapsed = now - self.next_frame_at
+            steps = 1 + int(elapsed / self.frame_interval)
+            self.frame_index += steps
+            self.next_frame_at += steps * self.frame_interval
         self.root.after(self.TICK_MS, self._tick)
 
     def close(self):
