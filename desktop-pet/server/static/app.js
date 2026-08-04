@@ -6,6 +6,7 @@ const percentText = document.querySelector("#percent");
 const messageText = document.querySelector("#message");
 const barFill = document.querySelector("#bar-fill");
 const download = document.querySelector("#download");
+const resumeGenerationButton = document.querySelector("#resume-generation-button");
 const buildExeButton = document.querySelector("#build-exe-button");
 const previewSection = document.querySelector("#preview-section");
 const previewGrid = document.querySelector("#preview-grid");
@@ -161,6 +162,14 @@ function showProgress(job) {
     download.classList.remove("hidden");
     download.textContent = job.artifact_kind === "exe" ? "下载 Windows exe" : "下载资源包 zip";
   }
+  const canResume = Boolean(job.resume_url);
+  resumeGenerationButton.classList.toggle("hidden", !canResume);
+  resumeGenerationButton.disabled = !canResume || job.status !== "failed";
+  const canBuildExe = canQueueExeBuild(job);
+  buildExeButton.textContent =
+    job.status === "failed" && job.artifact_kind === "zip"
+      ? "重试打包 Windows exe"
+      : "第二步：打包 Windows exe";
   renderPreviewImages(
     job.preview_images,
     previewSection,
@@ -175,8 +184,15 @@ function showProgress(job) {
   );
   confirmPreviewButton.disabled = job.status !== "preview_ready";
   restartPreviewButton.disabled = job.status !== "preview_ready";
-  buildExeButton.disabled = !(
-    currentJobId && job.status === "ready" && job.artifact_kind === "zip"
+  buildExeButton.disabled = !canBuildExe;
+}
+
+function canQueueExeBuild(job) {
+  return Boolean(
+    currentJobId &&
+      job &&
+      job.artifact_kind === "zip" &&
+      ["ready", "failed"].includes(job.status),
   );
 }
 
@@ -196,12 +212,35 @@ async function poll(jobId) {
   window.setTimeout(() => poll(jobId).catch(showError), 1500);
 }
 
+resumeGenerationButton.addEventListener("click", async () => {
+  if (!currentJobId || !currentJob || !currentJob.resume_url) return;
+  resumeGenerationButton.disabled = true;
+  submitButton.disabled = true;
+  confirmPreviewButton.disabled = true;
+  restartPreviewButton.disabled = true;
+  buildExeButton.disabled = true;
+  try {
+    const response = await fetch(currentJob.resume_url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: document.querySelector("#pet-name").value.trim() }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "继续生成动作资源失败");
+    showProgress(payload);
+    await poll(currentJobId);
+  } catch (error) {
+    showError(error);
+  }
+});
+
 function showError(error) {
   submitButton.disabled = false;
   confirmPreviewButton.disabled = true;
   restartPreviewButton.disabled = false;
-  buildExeButton.disabled = !(
-    currentJobId && currentJob && currentJob.status === "ready" && currentJob.artifact_kind === "zip"
+  buildExeButton.disabled = !canQueueExeBuild(currentJob);
+  resumeGenerationButton.disabled = !(
+    currentJob && currentJob.status === "failed" && currentJob.resume_url
   );
   progress.classList.remove("hidden");
   statusText.textContent = "failed";
@@ -219,6 +258,8 @@ form.addEventListener("submit", async (event) => {
   download.classList.add("hidden");
   previewSection.classList.add("hidden");
   resourcePreviewSection.classList.add("hidden");
+  resumeGenerationButton.classList.add("hidden");
+  resumeGenerationButton.disabled = true;
   previewGrid.replaceChildren();
   resourcePreviewGrid.replaceChildren();
   confirmPreviewButton.disabled = true;

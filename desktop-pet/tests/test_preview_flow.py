@@ -42,6 +42,21 @@ class PreviewFlowTests(unittest.TestCase):
             "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/previews/resource/walk/0/regenerate",
         )
 
+    def test_failed_generation_exposes_resume_url_when_cutouts_are_available(self):
+        record = {
+            "id": "b" * 32,
+            "status": "failed",
+            "preview_paths": ["prepared/reference_0.png"],
+        }
+
+        public = _public_job(record)
+
+        self.assertEqual(
+            public["resume_url"],
+            "/api/jobs/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/resume",
+        )
+        self.assertNotIn("preview_paths", public)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,28 @@ class WorkerHealthEndpointTests(unittest.TestCase):
         self.assertTrue(updated["build_exe"])
         self.assertEqual(updated["package_path"], str(package))
 
+    def test_failed_exe_build_can_be_retried_when_resource_package_exists(self) -> None:
+        package = Path(self.temporary.name) / "pet.zip"
+        package.write_bytes(b"resource package")
+        record = self.main.store.new_job("pet", 1, False)
+        self.main.store.update(
+            record["id"],
+            status="failed",
+            package_path=str(package),
+            artifact_path=str(package),
+            artifact_kind="zip",
+            error="Windows Worker 打包失败",
+        )
+
+        response = self.client.post(f"/api/jobs/{record['id']}/build-exe")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ready_for_build")
+        updated = self.main.store.read(record["id"])
+        self.assertEqual(updated["status"], "ready_for_build")
+        self.assertEqual(updated["error"], "")
+        self.assertTrue(updated["build_exe"])
+
 
 if __name__ == "__main__":
     unittest.main()

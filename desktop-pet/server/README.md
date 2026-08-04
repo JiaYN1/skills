@@ -31,7 +31,9 @@ docker compose up -d --build
 
 浏览器先调用 `POST /api/pets/prepare`。任务进入 `preview_processing`，AI 去背景完成后变为 `preview_ready`；`GET /api/jobs/{id}` 会返回 `preview_images`，图片通过受限的 `/api/jobs/{id}/preview/...` 地址预览。
 
-用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。
+用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。如果动作资源阶段失败但去背景预览仍然存在，可调用 `POST /api/jobs/{id}/resume` 复用已有预览继续生成，不会重复去背景。
+
+资源包生成成功但 Windows Worker 打包 exe 失败时，任务会保留 zip；页面会显示“重试打包 Windows exe”，再次提交 `POST /api/jobs/{id}/build-exe` 即可重试。
 
 ## AI 配置
 

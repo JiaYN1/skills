@@ -159,11 +159,9 @@ def generate_from_preview(
     if record.get("status") != "preview_ready":
         raise HTTPException(409, "请先完成去背景预览")
 
-    preview_paths = [
-        store.job_dir(job_id) / relative
-        for relative in record.get("preview_paths", [])
-    ]
-    if not preview_paths or not all(path.exists() for path in preview_paths):
+    try:
+        preview_paths = _prepared_preview_paths(job_id, record)
+    except FileNotFoundError:
         raise HTTPException(409, "去背景预览文件不存在，请重新上传")
 
     name = _safe_name(payload.name or record.get("name", "我的宠物"))
@@ -176,6 +174,43 @@ def generate_from_preview(
         progress=5,
         message="已确认去背景预览，正在生成动作资源",
         error="",
+    )
+    background_tasks.add_task(_run_generation, job_id, name, preview_paths, build_exe)
+    return _public_job(store.read(job_id))
+
+
+@app.post("/api/jobs/{job_id}/resume")
+def resume_failed_generation(
+    job_id: str,
+    payload: GenerateFromPreviewRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """Resume action generation from an already completed cutout stage."""
+
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if not _can_resume_from_preview(record):
+        raise HTTPException(409, "当前任务没有可复用的去背景预览")
+    try:
+        preview_paths = _prepared_preview_paths(job_id, record)
+    except FileNotFoundError:
+        raise HTTPException(409, "去背景预览文件不存在，请重新上传")
+
+    name = _safe_name(payload.name or record.get("name", "我的宠物"))
+    build_exe = bool(payload.build_exe or record.get("build_exe", False))
+    resume_count = int(record.get("resume_count", 0)) + 1
+    store.update(
+        job_id,
+        name=name,
+        build_exe=build_exe,
+        status="processing",
+        progress=5,
+        message="已复用去背景预览，正在继续生成动作资源",
+        error="",
+        resume_count=resume_count,
     )
     background_tasks.add_task(_run_generation, job_id, name, preview_paths, build_exe)
     return _public_job(store.read(job_id))
@@ -665,6 +700,33 @@ def _input_photo_path(job_id: str, index: int) -> Optional[Path]:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _prepared_preview_paths(job_id: str, record: Dict[str, Any]) -> List[Path]:
+    """Resolve stored cutout previews and reject missing or escaped files."""
+
+    relative_paths = list(record.get("preview_paths", []))
+    if not relative_paths:
+        raise FileNotFoundError("preview paths missing")
+
+    job_root = store.job_dir(job_id).resolve()
+    paths: List[Path] = []
+    for relative in relative_paths:
+        target = (job_root / str(relative)).resolve()
+        if job_root not in target.parents or not target.is_file():
+            raise FileNotFoundError(str(target))
+        paths.append(target)
+    return paths
+
+
+def _can_resume_from_preview(record: Dict[str, Any]) -> bool:
+    """Only action-generation failures can resume from cutout previews."""
+
+    return (
+        record.get("status") == "failed"
+        and bool(record.get("preview_paths"))
+        and not record.get("package_path")
+    )
+
+
 def _resource_frame_meta(
     record: Dict[str, Any],
     role: str,
@@ -726,6 +788,8 @@ def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
     )
     if record.get("artifact_path"):
         result["download_url"] = f"/api/jobs/{record['id']}/download"
+    if _can_resume_from_preview(record):
+        result["resume_url"] = f"/api/jobs/{record['id']}/resume"
     return result
 
 
