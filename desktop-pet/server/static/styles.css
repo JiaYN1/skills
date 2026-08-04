@@ -37,6 +37,16 @@ button:disabled { opacity: .55; cursor: wait; }
 .bar { height: 10px; margin-top: 12px; border-radius: 999px; background: #eee3d9; overflow: hidden; }
 #bar-fill { height: 100%; width: 0; background: #d99767; transition: width .3s ease; }
 .download { margin-top: 12px; }
+.preview-section { margin-top: 28px; padding-top: 24px; border-top: 1px solid #eee4db; }
+.preview-heading { display: flex; justify-content: space-between; gap: 16px; align-items: end; margin-bottom: 16px; }
+.preview-heading h2 { margin: 6px 0 0; font-size: 22px; }
+.preview-status { color: #81766c; font-size: 13px; text-align: right; }
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
+.preview-item { margin: 0; padding: 8px; border: 1px solid #e9e0d7; border-radius: 14px; background-color: #f6f2ec; background-image: linear-gradient(45deg, #ebe5dd 25%, transparent 25%), linear-gradient(-45deg, #ebe5dd 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ebe5dd 75%), linear-gradient(-45deg, transparent 75%, #ebe5dd 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+.preview-item img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 9px; background: rgba(255, 255, 255, .18); }
+.preview-item figcaption { margin-top: 7px; overflow: hidden; color: #6d6259; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.preview-actions { margin-top: 16px; }
 .hidden { display: none; }
 .footer { margin-top: 18px; color: #8b7c70; font-size: 12px; }
 
@@ -44,4 +54,6 @@ button:disabled { opacity: .55; cursor: wait; }
   .shell { padding-top: 36px; }
   .card { padding: 20px; }
   .settings-grid { grid-template-columns: 1fr; gap: 0; }
+  .preview-heading { align-items: start; flex-direction: column; gap: 6px; }
+  .preview-status { text-align: left; }
 }

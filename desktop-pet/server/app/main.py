@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hmac
 import shutil
+import sys
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -11,13 +13,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .ai_provider import OpenAICompatibleImageProvider
+from .ai_provider import ImageGenerationError, OpenAICompatibleImageProvider
 from .config import settings
 from .package_builder import build_pet_package
 from .storage import JobStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from pet_assets import normalize_pet_image  # noqa: E402
+
 store = JobStore(settings.data_dir)
 provider = OpenAICompatibleImageProvider(settings)
 app = FastAPI(title="AI Desktop Pet Generator", version="0.2.0")
@@ -37,6 +44,11 @@ class AISettingsUpdate(BaseModel):
     animation_fps: Optional[int] = Field(default=None, ge=1, le=60)
     walk_frame_count: Optional[int] = Field(default=None, ge=1, le=12)
     sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=12)
+
+
+class GenerateFromPreviewRequest(BaseModel):
+    name: Optional[str] = None
+    build_exe: bool = False
 
 if settings.cors_origins:
     app.add_middleware(
@@ -76,6 +88,36 @@ def update_ai_settings(
         raise HTTPException(400, str(error))
 
 
+@app.post("/api/pets/prepare")
+async def prepare_pet(
+    background_tasks: BackgroundTasks,
+    photos: List[UploadFile] = File(...),
+    name: str = Form("我的宠物"),
+) -> Dict[str, Any]:
+    """Create a job whose first stage only removes photo backgrounds."""
+
+    if not photos or len(photos) > settings.max_files:
+        raise HTTPException(400, f"请上传 1-{settings.max_files} 张图片")
+
+    safe_name = _safe_name(name)
+    record = store.new_job(safe_name, len(photos), False)
+    job_id = record["id"]
+    try:
+        saved_paths = await _save_uploaded_photos(job_id, photos)
+    except Exception:
+        shutil.rmtree(store.job_dir(job_id), ignore_errors=True)
+        raise
+
+    store.update(
+        job_id,
+        status="preview_processing",
+        progress=1,
+        message="正在先为上传图片去背景",
+    )
+    background_tasks.add_task(_run_preparation, job_id, saved_paths)
+    return _public_job(store.read(job_id))
+
+
 @app.post("/api/pets/generate")
 async def generate_pet(
     background_tasks: BackgroundTasks,
@@ -89,21 +131,51 @@ async def generate_pet(
     safe_name = _safe_name(name)
     record = store.new_job(safe_name, len(photos), build_exe)
     job_id = record["id"]
-    input_dir = store.job_dir(job_id) / "input"
-    saved_paths: List[Path] = []
     try:
-        for index, upload in enumerate(photos):
-            suffix = Path(upload.filename or "photo.png").suffix.lower()
-            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}:
-                raise HTTPException(400, f"不支持的图片格式：{suffix or 'unknown'}")
-            target = input_dir / f"photo_{index}{suffix}"
-            await _save_upload(upload, target)
-            saved_paths.append(target)
+        saved_paths = await _save_uploaded_photos(job_id, photos)
     except Exception:
         shutil.rmtree(store.job_dir(job_id), ignore_errors=True)
         raise
 
     background_tasks.add_task(_run_generation, job_id, safe_name, saved_paths, build_exe)
+    return _public_job(store.read(job_id))
+
+
+@app.post("/api/jobs/{job_id}/generate")
+def generate_from_preview(
+    job_id: str,
+    payload: GenerateFromPreviewRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """Start action generation after the user confirms cutout previews."""
+
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if record.get("status") != "preview_ready":
+        raise HTTPException(409, "请先完成去背景预览")
+
+    preview_paths = [
+        store.job_dir(job_id) / relative
+        for relative in record.get("preview_paths", [])
+    ]
+    if not preview_paths or not all(path.exists() for path in preview_paths):
+        raise HTTPException(409, "去背景预览文件不存在，请重新上传")
+
+    name = _safe_name(payload.name or record.get("name", "我的宠物"))
+    build_exe = bool(payload.build_exe)
+    store.update(
+        job_id,
+        name=name,
+        build_exe=build_exe,
+        status="processing",
+        progress=5,
+        message="已确认去背景预览，正在生成动作资源",
+        error="",
+    )
+    background_tasks.add_task(_run_generation, job_id, name, preview_paths, build_exe)
     return _public_job(store.read(job_id))
 
 
@@ -113,6 +185,43 @@ def get_job(job_id: str) -> Dict[str, Any]:
         return _public_job(store.read(job_id))
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+
+
+@app.get("/api/jobs/{job_id}/preview/{asset_path:path}")
+def preview_job_asset(job_id: str, asset_path: str):
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    relative = Path(asset_path)
+    normalized = relative.as_posix()
+    known_paths = {
+        str(path).replace("\\", "/")
+        for path in (
+            list(record.get("preview_paths", []))
+            + list(record.get("resource_preview_paths", []))
+        )
+    }
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or normalized not in known_paths
+        or relative.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}
+    ):
+        raise HTTPException(404, "预览图片不存在")
+
+    job_root = store.job_dir(job_id).resolve()
+    target = (job_root / relative).resolve()
+    if job_root not in target.parents or not target.is_file():
+        raise HTTPException(404, "预览图片不存在")
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }[relative.suffix.lower()]
+    return FileResponse(str(target), media_type=media_type)
 
 
 @app.post("/api/jobs/{job_id}/build-exe")
@@ -237,6 +346,47 @@ def worker_error(
     return {"ok": True}
 
 
+async def _run_preparation(job_id: str, paths: List[Path]) -> None:
+    """Generate and persist transparent identity previews before animation."""
+
+    prepared_dir = store.job_dir(job_id) / "prepared"
+    prepared_dir.mkdir(parents=True, exist_ok=True)
+    preview_paths: List[str] = []
+    try:
+        if not provider.available:
+            raise ImageGenerationError("AI 图像服务未配置，无法执行去背景预处理")
+
+        for index, source in enumerate(paths):
+            progress = 5 + int(index * 80 / max(1, len(paths)))
+            store.update(
+                job_id,
+                progress=progress,
+                message=f"正在为第 {index + 1}/{len(paths)} 张图片去背景",
+            )
+            raw_path = prepared_dir / f"raw_{index}.png"
+            preview_path = prepared_dir / f"reference_{index}.png"
+            await provider.remove_background(source, raw_path)
+            _normalize_ai_preview(raw_path, preview_path)
+            preview_paths.append(f"prepared/{preview_path.name}")
+
+        store.update(
+            job_id,
+            status="preview_ready",
+            progress=100,
+            message="去背景预览已完成，请确认图片后生成动作资源",
+            preview_paths=preview_paths,
+            error="",
+        )
+    except Exception as error:
+        store.update(
+            job_id,
+            status="failed",
+            progress=0,
+            message=str(error)[-4000:],
+            error=str(error)[-4000:],
+        )
+
+
 async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: bool) -> None:
     store.update(job_id, status="processing", progress=5, message="正在准备照片")
 
@@ -274,9 +424,23 @@ async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: 
             ai_frame_total=ai_frame_total,
             ai_error_count=result["ai_error_count"],
             animation_mode=result.get("animation_mode", settings.animation_mode),
+            resource_preview_paths=result.get("resource_preview_paths", []),
         )
     except Exception as error:
         store.update(job_id, status="failed", progress=0, message=str(error)[-4000:], error=str(error)[-4000:])
+
+
+async def _save_uploaded_photos(job_id: str, photos: List[UploadFile]) -> List[Path]:
+    input_dir = store.job_dir(job_id) / "input"
+    saved_paths: List[Path] = []
+    for index, upload in enumerate(photos):
+        suffix = Path(upload.filename or "photo.png").suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}:
+            raise HTTPException(400, f"不支持的图片格式：{suffix or 'unknown'}")
+        target = input_dir / f"photo_{index}{suffix}"
+        await _save_upload(upload, target)
+        saved_paths.append(target)
+    return saved_paths
 
 
 async def _save_upload(upload: UploadFile, target: Path, limit: Optional[int] = None) -> None:
@@ -293,6 +457,23 @@ async def _save_upload(upload: UploadFile, target: Path, limit: Optional[int] = 
             output.write(chunk)
 
 
+def _normalize_ai_preview(source: Path, destination: Path) -> None:
+    from PIL import Image
+
+    with Image.open(source) as image:
+        alpha = image.convert("RGBA").getchannel("A")
+        background_mode = "none" if alpha.getextrema() != (255, 255) else "simple"
+
+    normalize_pet_image(
+        source,
+        destination,
+        canvas_size=512,
+        background_mode=background_mode,
+        anchor="center",
+        subject_scale=0.96,
+    )
+
+
 def _artifact_path(record: Dict[str, Any]) -> Optional[Path]:
     path = record.get("artifact_path")
     return Path(path) if path else None
@@ -300,11 +481,27 @@ def _artifact_path(record: Dict[str, Any]) -> Optional[Path]:
 
 def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(record)
+    preview_paths = list(result.pop("preview_paths", []))
+    resource_preview_paths = list(result.pop("resource_preview_paths", []))
     result.pop("artifact_path", None)
     result.pop("package_path", None)
+    result["preview_images"] = _preview_entries(record["id"], preview_paths)
+    result["resource_preview_images"] = _preview_entries(
+        record["id"], resource_preview_paths
+    )
     if record.get("artifact_path"):
         result["download_url"] = f"/api/jobs/{record['id']}/download"
     return result
+
+
+def _preview_entries(job_id: str, paths: List[str]) -> List[Dict[str, str]]:
+    return [
+        {
+            "name": Path(path).name,
+            "url": f"/api/jobs/{job_id}/preview/{quote(path, safe='/')}",
+        }
+        for path in paths
+    ]
 
 
 def _safe_name(value: str) -> str:

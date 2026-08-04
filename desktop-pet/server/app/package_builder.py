@@ -149,12 +149,18 @@ async def build_pet_package(
                 archive.write(path, path.relative_to(package_dir).as_posix())
 
     progress(88, "资源包已生成")
+    resource_preview_paths = [
+        f"package/{asset_path}"
+        for role in ROLES
+        for asset_path in config_assets.get(role, [])
+    ]
     return {
         "package_dir": package_dir,
         "zip_path": zip_path,
         "ai_frame_total": ai_frame_total,
         "ai_error_count": ai_error_count,
         "animation_mode": animation_manifest["mode"],
+        "resource_preview_paths": resource_preview_paths,
     }
 
 

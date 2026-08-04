@@ -104,10 +104,10 @@
           </label>
           <p class="hint">第一张作为身份锚点；建议再上传侧面、站立和趴下等姿态，AI 会按姿态计划生成走动/睡觉循环并尽量保持毛色、比例和落地基线一致。</p>
 
-          <p class="hint">先生成资源包；资源完成后可单独请求 Windows Worker 打包 exe。服务器为 Linux Docker 时，需要在线的 Windows Worker 完成第二步。</p>
+          <p class="hint">第一步先由 AI 去除上传图片背景并预览；确认主体无误后，再生成动作资源。资源完成后可单独请求 Windows Worker 打包 exe。</p>
 
           <div class="form-actions">
-            <button id="submit" type="submit">第一步：生成资源</button>
+            <button id="submit" type="submit">第一步：去背景并预览</button>
             <button id="build-exe-button" class="secondary" type="button" disabled>第二步：打包 Windows exe</button>
           </div>
         </form>
@@ -118,6 +118,32 @@
           <p id="message" class="hint"></p>
           <a id="download" class="download hidden" href="#">下载生成结果</a>
         </div>
+
+        <section id="preview-section" class="preview-section hidden">
+          <div class="preview-heading">
+            <div>
+              <span class="eyebrow">STEP 1</span>
+              <h2>去背景预览</h2>
+            </div>
+            <span class="preview-status">请确认主体边缘和透明背景</span>
+          </div>
+          <div id="preview-grid" class="preview-grid"></div>
+          <div class="form-actions preview-actions">
+            <button id="confirm-preview" type="button" disabled>确认预览，生成动作资源</button>
+            <button id="restart-preview" class="secondary" type="button" disabled>重新上传</button>
+          </div>
+        </section>
+
+        <section id="resource-preview-section" class="preview-section hidden">
+          <div class="preview-heading">
+            <div>
+              <span class="eyebrow">STEP 2</span>
+              <h2>动作资源预览</h2>
+            </div>
+            <span class="preview-status">生成的 PNG 帧</span>
+          </div>
+          <div id="resource-preview-grid" class="preview-grid"></div>
+        </section>
       </section>
 
       <p class="footer">AI 生成会将照片发送到你配置的图像服务。请先确认服务商的隐私政策。</p>

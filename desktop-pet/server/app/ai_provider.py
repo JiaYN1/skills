@@ -105,6 +105,38 @@ class OpenAICompatibleImageProvider:
                     break
         return output_paths
 
+    async def remove_background(self, source: Path, output_path: Path) -> Path:
+        """Ask the image model for one transparent cutout preview.
+
+        This is deliberately a separate, single-image step from animation
+        generation. The user can inspect the identity reference before the
+        more expensive pose-generation stage starts.
+        """
+
+        if not self.available:
+            raise ImageGenerationError("AI 图像服务未配置，无法执行去背景预处理")
+
+        transparent_background = self._transparent_background_support(
+            self.settings.ai_image_model
+        )
+        prompt = self._background_removal_prompt(transparent_background)
+        response = await self._request(prompt, [source], frame_count=1)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ImageGenerationError("图像服务返回了无法识别的数据格式")
+        items = payload.get("data") or payload.get("images") or []
+        if not isinstance(items, list):
+            raise ImageGenerationError("图像服务返回了无法识别的数据格式")
+
+        async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
+            for item in items:
+                image_bytes = await self._decode_item(client, item)
+                if image_bytes:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(image_bytes)
+                    return output_path
+        raise ImageGenerationError("图像服务没有返回可预览的去背景图片")
+
     @staticmethod
     def _reference_paths(references: List[Path], identity_reference: Optional[Path]) -> List[Path]:
         """Put the identity anchor first and remove duplicate reference files."""
@@ -253,4 +285,28 @@ class OpenAICompatibleImageProvider:
             f"The ordered pose plan is: {sequence}. "
             f"{background} Keep clean anti-aliased edges, no text, no frame, no room, no people, "
             "no watermark, no shadow, and no extra animals."
+        )
+
+    @staticmethod
+    def _background_removal_prompt(
+        transparent_background: Optional[bool] = None,
+    ) -> str:
+        compatibility = ""
+        if transparent_background is False:
+            compatibility = (
+                " The API request may omit the background parameter for model compatibility, "
+                "but the transparent-background output setting still applies."
+            )
+        return (
+            "Image editing task: remove the entire background from this exact pet photo before "
+            "any animation is generated. Preserve the pet's identity, species, fur or feather "
+            "colors, markings, face, body shape, pose, proportions, crop, camera angle, and "
+            "lighting. Do not redraw, stylize, rotate, retouch, or add details. "
+            "Output settings: transparent background enabled. Return exactly one PNG with a real "
+            "RGBA color model and a clean alpha channel containing only the pet. Remove the room, "
+            "floor, furniture, people, leash, text, watermark, and all shadows. Do not use a white, "
+            "green, or checkerboard background. If native alpha encoding is unavailable, use one "
+            "perfectly uniform white background (#FFFFFF) with no texture or shadow as a compatibility "
+            "fallback; never invent a scene."
+            + compatibility
         )

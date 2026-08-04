@@ -7,6 +7,12 @@ const messageText = document.querySelector("#message");
 const barFill = document.querySelector("#bar-fill");
 const download = document.querySelector("#download");
 const buildExeButton = document.querySelector("#build-exe-button");
+const previewSection = document.querySelector("#preview-section");
+const previewGrid = document.querySelector("#preview-grid");
+const confirmPreviewButton = document.querySelector("#confirm-preview");
+const restartPreviewButton = document.querySelector("#restart-preview");
+const resourcePreviewSection = document.querySelector("#resource-preview-section");
+const resourcePreviewGrid = document.querySelector("#resource-preview-grid");
 const adminTokenInput = document.querySelector("#admin-token");
 const aiSettingsForm = document.querySelector("#ai-settings-form");
 const loadAiSettingsButton = document.querySelector("#load-ai-settings");
@@ -41,6 +47,27 @@ function fillAiSettings(values) {
   document.querySelector("#ai-key").placeholder = values.configured
     ? `已配置（${values.api_key_mask}），留空表示不修改`
     : "尚未配置 API Key";
+}
+
+function renderPreviewImages(items, section, grid) {
+  grid.replaceChildren();
+  if (!Array.isArray(items) || !items.length) {
+    section.classList.add("hidden");
+    return;
+  }
+  for (const item of items) {
+    const figure = document.createElement("figure");
+    figure.className = "preview-item";
+    const image = document.createElement("img");
+    image.src = item.url;
+    image.alt = item.name || "宠物预览";
+    image.loading = "lazy";
+    const caption = document.createElement("figcaption");
+    caption.textContent = item.name || "预览图片";
+    figure.append(image, caption);
+    grid.append(figure);
+  }
+  section.classList.remove("hidden");
 }
 
 async function loadAiSettings() {
@@ -94,7 +121,7 @@ aiSettingsForm.addEventListener("submit", async (event) => {
 function showProgress(job) {
   currentJob = job;
   progress.classList.remove("hidden");
-  statusText.textContent = job.status || "processing";
+  statusText.textContent = job.status === "preview_ready" ? "等待确认预览" : (job.status || "processing");
   const percent = Math.max(0, Math.min(100, Number(job.progress || 0)));
   percentText.textContent = `${percent}%`;
   barFill.style.width = `${percent}%`;
@@ -104,6 +131,10 @@ function showProgress(job) {
     download.classList.remove("hidden");
     download.textContent = job.artifact_kind === "exe" ? "下载 Windows exe" : "下载资源包 zip";
   }
+  renderPreviewImages(job.preview_images, previewSection, previewGrid);
+  renderPreviewImages(job.resource_preview_images, resourcePreviewSection, resourcePreviewGrid);
+  confirmPreviewButton.disabled = job.status !== "preview_ready";
+  restartPreviewButton.disabled = job.status !== "preview_ready";
   buildExeButton.disabled = !(
     currentJobId && job.status === "ready" && job.artifact_kind === "zip"
   );
@@ -114,6 +145,10 @@ async function poll(jobId) {
   const job = await response.json();
   if (!response.ok) throw new Error(job.detail || "读取任务失败");
   showProgress(job);
+  if (job.status === "preview_ready") {
+    submitButton.disabled = true;
+    return;
+  }
   if (["ready", "failed"].includes(job.status)) {
     submitButton.disabled = false;
     return;
@@ -123,6 +158,8 @@ async function poll(jobId) {
 
 function showError(error) {
   submitButton.disabled = false;
+  confirmPreviewButton.disabled = true;
+  restartPreviewButton.disabled = false;
   buildExeButton.disabled = !(
     currentJobId && currentJob && currentJob.status === "ready" && currentJob.artifact_kind === "zip"
   );
@@ -140,12 +177,17 @@ form.addEventListener("submit", async (event) => {
   currentJobId = null;
   currentJob = null;
   download.classList.add("hidden");
+  previewSection.classList.add("hidden");
+  resourcePreviewSection.classList.add("hidden");
+  previewGrid.replaceChildren();
+  resourcePreviewGrid.replaceChildren();
+  confirmPreviewButton.disabled = true;
+  restartPreviewButton.disabled = true;
   const body = new FormData(form);
   body.delete("photos");
   for (const file of files) body.append("photos", file);
-  body.set("build_exe", "false");
   try {
-    const response = await fetch("/api/pets/generate", { method: "POST", body });
+    const response = await fetch("/api/pets/prepare", { method: "POST", body });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "提交失败");
     currentJobId = payload.id;
@@ -154,6 +196,40 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     showError(error);
   }
+});
+
+confirmPreviewButton.addEventListener("click", async () => {
+  if (!currentJobId || !currentJob || currentJob.status !== "preview_ready") return;
+  confirmPreviewButton.disabled = true;
+  submitButton.disabled = true;
+  try {
+    const response = await fetch(`/api/jobs/${currentJobId}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: document.querySelector("#pet-name").value.trim() }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "生成动作资源失败");
+    showProgress(payload);
+    await poll(currentJobId);
+  } catch (error) {
+    showError(error);
+  }
+});
+
+restartPreviewButton.addEventListener("click", () => {
+  currentJobId = null;
+  currentJob = null;
+  document.querySelector("#photos").value = "";
+  previewSection.classList.add("hidden");
+  resourcePreviewSection.classList.add("hidden");
+  previewGrid.replaceChildren();
+  resourcePreviewGrid.replaceChildren();
+  confirmPreviewButton.disabled = true;
+  restartPreviewButton.disabled = true;
+  submitButton.disabled = false;
+  buildExeButton.disabled = true;
+  progress.classList.add("hidden");
 });
 
 buildExeButton.addEventListener("click", async () => {

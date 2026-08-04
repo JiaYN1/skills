@@ -1,6 +1,6 @@
 # 宠物桌面生成器 MVP
 
-这是一个本地优先的 Windows 桌面宠物原型：选择几张宠物照片，程序会将它们标准化为透明 PNG，生成一个资源包，并可在 Windows 上调用 PyInstaller 打包成单文件 `.exe`。
+这是一个本地优先的 Windows 桌面宠物原型：选择几张宠物照片，程序会先去除背景并预览透明主体，确认后生成动作资源包，并可在 Windows 上调用 PyInstaller 打包成单文件 `.exe`。
 
 现在同时包含 Docker 服务端版本：浏览器上传照片后，服务端可调用 AI 图像服务生成动作帧，再由 Windows Worker 完成最终 exe 打包。服务端说明见 [server/README.md](server/README.md)。
 
@@ -13,7 +13,7 @@ Windows Worker 和 Windows + AI 交接步骤见 [WINDOWS_WORKER_HANDOFF.md](WIND
 - 待机呼吸、左右走动、自动睡觉、点击弹跳反应。
 - 右键菜单：立即睡觉、恢复活动、退出。
 - 支持一张照片起步，也支持多张照片作为动作/备用帧。
-- 服务端通过 AI 提示词要求直接输出透明背景 PNG，服务端只做 alpha 校验、主体缩放和动作帧对齐。
+- 服务端先通过 AI 提示词生成透明主体预览，确认后再生成透明动作帧，并提供动作资源预览。
 - 统一的身份参考图、透明化、落地基线和主体比例处理，减少不同动作帧漂移。
 - 服务端可按动作生成 10-12 张有序走动/睡觉 PNG，并导出 `animation.json` 与可选 `skeleton.json`。
 - Windows 上通过 PyInstaller 生成包含资源的单文件 exe。

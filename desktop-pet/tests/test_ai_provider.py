@@ -51,6 +51,15 @@ class ImageProviderModelTests(unittest.TestCase):
         self.assertIn("fully transparent background", prompt)
         self.assertIn("real RGBA", prompt)
 
+    def test_background_preview_prompt_does_not_change_pet(self):
+        prompt = OpenAICompatibleImageProvider._background_removal_prompt(True)
+
+        self.assertIn("remove the entire background", prompt)
+        self.assertIn("transparent background enabled", prompt)
+        self.assertIn("exactly one PNG", prompt)
+        self.assertIn("Do not redraw", prompt)
+        self.assertIn("never invent a scene", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

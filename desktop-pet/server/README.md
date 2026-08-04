@@ -3,9 +3,10 @@
 服务端提供一个简单的浏览器页面和 API：
 
 1. 用户上传 1-8 张照片。
-2. 服务端把原图作为身份参考交给 OpenAI-compatible 图像服务，并在提示词中要求 AI 直接输出透明背景动作帧；服务端只做 PNG、alpha、主体缩放和落地基线校验，不再使用本地分割模型。
-3. 服务端生成资源包 zip。
-4. 如果勾选 exe，Windows Worker 从服务端领取资源包，在 Windows 上用 PyInstaller 打包并回传 exe。
+2. 第一步调用 OpenAI-compatible 图像服务单独去除每张照片背景，浏览器展示透明主体预览。
+3. 用户确认预览后，第二步才生成待机、走动、睡觉和点击动作帧，并展示生成的 PNG 资源预览。
+4. 服务端生成资源包 zip。
+5. 如果请求 exe，Windows Worker 从服务端领取资源包，在 Windows 上用 PyInstaller 打包并回传 exe。
 
 ## 启动 Docker 服务
 
@@ -25,6 +26,12 @@ docker compose up -d --build
 打开首页的“AI 配置（管理员）”面板，输入 `ADMIN_TOKEN` 后即可配置启用开关、API 地址、模型、API Key、基础动作帧数、走动/睡觉帧数、FPS、参考图数量、姿态一致性和输出格式。Key 会保存在 `/data/settings.json`，不会返回原文；普通上传用户不需要管理令牌。
 
 首次部署必须在 `.env` 中设置 `ADMIN_TOKEN`，不要使用公开的默认值。
+
+## 两阶段预览流程
+
+浏览器先调用 `POST /api/pets/prepare`。任务进入 `preview_processing`，AI 去背景完成后变为 `preview_ready`；`GET /api/jobs/{id}` 会返回 `preview_images`，图片通过受限的 `/api/jobs/{id}/preview/...` 地址预览。
+
+用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。
 
 ## AI 配置
 
