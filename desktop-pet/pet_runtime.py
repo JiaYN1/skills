@@ -71,6 +71,177 @@ def load_bundle(config_path: Optional[Union[str, Path]] = None) -> Tuple[PetConf
     return PetConfig.from_file(path), path.parent
 
 
+class _WindowsLayeredRenderer:
+    """Present RGBA frames with native per-pixel alpha on Windows.
+
+    Tk's ``-transparentcolor`` is a color key. Anti-aliased pixels are first
+    composited against that key color, which can leave a visible green fringe.
+    A layered window consumes premultiplied BGRA pixels instead and preserves
+    the PNG alpha channel all the way to the desktop.
+    """
+
+    GWL_EXSTYLE = -20
+    WS_EX_LAYERED = 0x00080000
+    ULW_ALPHA = 0x00000002
+    AC_SRC_OVER = 0
+    AC_SRC_ALPHA = 1
+
+    def __init__(self, hwnd: int, width: int, height: int):
+        import ctypes
+
+        self.ctypes = ctypes
+        self.user32 = ctypes.windll.user32
+        self.gdi32 = ctypes.windll.gdi32
+        self.width = int(width)
+        self.height = int(height)
+
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        class Size(ctypes.Structure):
+            _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+        class BlendFunction(ctypes.Structure):
+            _fields_ = [
+                ("BlendOp", ctypes.c_ubyte),
+                ("BlendFlags", ctypes.c_ubyte),
+                ("SourceConstantAlpha", ctypes.c_ubyte),
+                ("AlphaFormat", ctypes.c_ubyte),
+            ]
+
+        class BitmapInfoHeader(ctypes.Structure):
+            _fields_ = [
+                ("biSize", ctypes.c_uint32),
+                ("biWidth", ctypes.c_int32),
+                ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16),
+                ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32),
+                ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32),
+                ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32),
+            ]
+
+        class BitmapInfo(ctypes.Structure):
+            _fields_ = [
+                ("bmiHeader", BitmapInfoHeader),
+                ("bmiColors", ctypes.c_uint32 * 3),
+            ]
+
+        self.Point = Point
+        self.Size = Size
+        self.BlendFunction = BlendFunction
+        self.BitmapInfo = BitmapInfo
+        self.hwnd = hwnd
+
+        self.gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+        self.gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        self.gdi32.CreateDIBSection.restype = ctypes.c_void_p
+        self.gdi32.CreateDIBSection.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(BitmapInfo),
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        self.gdi32.SelectObject.restype = ctypes.c_void_p
+        self.gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+        self.gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+        self.user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.user32.GetWindowLongW.restype = ctypes.c_long
+        self.user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+        self.user32.SetWindowLongW.restype = ctypes.c_long
+        self.user32.UpdateLayeredWindow.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(Size),
+            ctypes.c_void_p,
+            ctypes.POINTER(Point),
+            ctypes.c_uint32,
+            ctypes.POINTER(BlendFunction),
+            ctypes.c_uint32,
+        ]
+        self.user32.UpdateLayeredWindow.restype = ctypes.c_bool
+
+        style = self.user32.GetWindowLongW(hwnd, self.GWL_EXSTYLE)
+        self.user32.SetWindowLongW(hwnd, self.GWL_EXSTYLE, style | self.WS_EX_LAYERED)
+
+        info = BitmapInfo()
+        info.bmiHeader.biSize = ctypes.sizeof(BitmapInfoHeader)
+        info.bmiHeader.biWidth = self.width
+        # A negative height requests a top-down DIB, matching Pillow's row order.
+        info.bmiHeader.biHeight = -self.height
+        info.bmiHeader.biPlanes = 1
+        info.bmiHeader.biBitCount = 32
+        info.bmiHeader.biCompression = 0
+        bits = ctypes.c_void_p()
+        self.memory_dc = self.gdi32.CreateCompatibleDC(None)
+        self.bitmap = self.gdi32.CreateDIBSection(
+            self.memory_dc,
+            ctypes.byref(info),
+            0,
+            ctypes.byref(bits),
+            None,
+            0,
+        )
+        if not self.memory_dc or not self.bitmap or not bits.value:
+            self.close()
+            raise RuntimeError("无法创建 Windows 分层窗口缓冲区")
+        self.bits = bits
+        self.previous_bitmap = self.gdi32.SelectObject(self.memory_dc, self.bitmap)
+
+    def update(self, image) -> None:
+        from PIL import Image, ImageChops
+
+        image = image.convert("RGBA")
+        if image.size != (self.width, self.height):
+            image = image.resize((self.width, self.height), Image.Resampling.LANCZOS)
+        red, green, blue, alpha = image.split()
+        # UpdateLayeredWindow expects premultiplied BGRA, not straight RGBA.
+        red = ImageChops.multiply(red, alpha)
+        green = ImageChops.multiply(green, alpha)
+        blue = ImageChops.multiply(blue, alpha)
+        premultiplied = Image.merge("RGBA", (red, green, blue, alpha))
+        data = premultiplied.tobytes("raw", "BGRA")
+        self.ctypes.memmove(self.bits, data, len(data))
+
+        source_point = self.Point(0, 0)
+        size = self.Size(self.width, self.height)
+        blend = self.BlendFunction(
+            self.AC_SRC_OVER,
+            0,
+            255,
+            self.AC_SRC_ALPHA,
+        )
+        if not self.user32.UpdateLayeredWindow(
+            self.hwnd,
+            None,
+            None,
+            self.ctypes.byref(size),
+            self.memory_dc,
+            self.ctypes.byref(source_point),
+            0,
+            self.ctypes.byref(blend),
+            self.ULW_ALPHA,
+        ):
+            raise RuntimeError("Windows 分层窗口更新失败")
+
+    def close(self) -> None:
+        if getattr(self, "memory_dc", None):
+            if getattr(self, "previous_bitmap", None):
+                self.gdi32.SelectObject(self.memory_dc, self.previous_bitmap)
+            self.gdi32.DeleteDC(self.memory_dc)
+            self.memory_dc = None
+        if getattr(self, "bitmap", None):
+            self.gdi32.DeleteObject(self.bitmap)
+            self.bitmap = None
+
+
 class PetWindow:
     """A small state-machine-driven transparent Tk window."""
 
@@ -102,13 +273,15 @@ class PetWindow:
         self.root = tk.Tk()
         self.root.title(config.name)
         self.root.overrideredirect(True)
-        self.root.configure(bg=self.TRANSPARENT)
+        self.native_alpha = sys.platform == "win32"
+        self.layered_renderer = None
+        self.root.configure(bg="#000000" if self.native_alpha else self.TRANSPARENT)
         self.root.attributes("-topmost", config.always_on_top)
-        try:
-            self.root.wm_attributes("-transparentcolor", self.TRANSPARENT)
-        except tk.TclError:
-            # Linux/macOS preview fallback; Windows supports this attribute.
-            self.root.attributes("-alpha", 1.0)
+        if not self.native_alpha:
+            try:
+                self.root.attributes("-alpha", 1.0)
+            except tk.TclError:
+                pass
 
         try:
             self.root.wm_attributes("-toolwindow", True)
@@ -117,7 +290,7 @@ class PetWindow:
 
         self.canvas = tk.Canvas(
             self.root,
-            bg=self.TRANSPARENT,
+            bg="#000000" if self.native_alpha else self.TRANSPARENT,
             bd=0,
             highlightthickness=0,
             relief="flat",
@@ -155,14 +328,38 @@ class PetWindow:
         self.x = max(0, (screen_width - width) // 2)
         self.y = max(0, screen_height - height - 100)
         self._set_geometry(width, height)
+
+        if self.native_alpha:
+            try:
+                self.layered_renderer = _WindowsLayeredRenderer(
+                    self.root.winfo_id(),
+                    width,
+                    height,
+                )
+            except Exception:
+                # Keep a functional fallback for older Tk/Windows builds.
+                self.native_alpha = False
+                self.root.configure(bg=self.TRANSPARENT)
+                self.canvas.configure(bg=self.TRANSPARENT)
+                try:
+                    self.root.wm_attributes("-transparentcolor", self.TRANSPARENT)
+                except tk.TclError:
+                    self.root.attributes("-alpha", 1.0)
+
+        if not self.native_alpha:
+            self.frames = self._photo_frames(self.frames)
+            first_frame = self.frames["idle"][0]
         self.photo_image = first_frame
-        self.image_item = self.canvas.create_image(
-            0,
-            0,
-            anchor="nw",
-            image=first_frame,
-            tags="pet",
-        )
+        if self.native_alpha:
+            self._present_frame(first_frame)
+        else:
+            self.image_item = self.canvas.create_image(
+                0,
+                0,
+                anchor="nw",
+                image=first_frame,
+                tags="pet",
+            )
 
     def _resolve_asset(self, relative_path: str) -> Path:
         path = Path(relative_path)
@@ -220,6 +417,12 @@ class PetWindow:
         canvas = self.Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
         self._paste_center(canvas, image)
         return canvas
+
+    def _photo_frames(self, frames: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        return {
+            role: [self.ImageTk.PhotoImage(image) for image in role_frames]
+            for role, role_frames in frames.items()
+        }
 
     def _animation_frame(self, source, state: str, step: int):
         """Create subtle procedural motion around the user's photo."""
@@ -310,14 +513,14 @@ class PetWindow:
     def _frame_count(self, role: str, source_count: int) -> int:
         if source_count > 1:
             return source_count
-        defaults = {"idle": 8, "walk": 12, "sleep": 10, "react": 6}
+        defaults = {"idle": 8, "walk": 16, "sleep": 12, "react": 6}
         sequences = self.config.animation.get("sequences", {})
         sequence = sequences.get(role, {}) if isinstance(sequences, dict) else {}
         if isinstance(sequence, dict):
             configured = sequence.get("fallback_frame_count")
             if configured:
                 try:
-                    return max(1, min(12, int(configured)))
+                    return max(1, min(24, int(configured)))
                 except (TypeError, ValueError):
                     pass
         return defaults.get(role, 8)
@@ -341,7 +544,7 @@ class PetWindow:
                     image = self._fit_image(source)
                 else:
                     image = self._animation_frame(source, role, index)
-                rendered.append(self.ImageTk.PhotoImage(image))
+                rendered.append(image)
             frames[role] = rendered
         return frames
 
@@ -349,6 +552,7 @@ class PetWindow:
         import tkinter as tk
 
         self.menu = tk.Menu(self.root, tearoff=False)
+        self.menu.add_command(label="开始走动", command=lambda: self._enter_state("walk", 6.0))
         self.menu.add_command(label="现在睡觉", command=lambda: self._enter_state("sleep", 8.0))
         self.menu.add_command(label="恢复活动", command=lambda: self._enter_state("idle", 0.0))
         self.menu.add_separator()
@@ -394,13 +598,12 @@ class PetWindow:
         if self.state == "react" and elapsed >= self.state_duration:
             self._enter_state("idle", 0.0)
         elif self.state == "sleep" and elapsed >= self.state_duration:
-            self._enter_state("idle", 0.0)
+            # Sleep is the only automatic non-idle state. It stays asleep
+            # until the user clicks the pet or chooses another menu action.
+            return
         elif self.state == "idle":
             if now - self.last_interaction >= self.config.sleep_after_seconds:
                 self._enter_state("sleep", random.uniform(8.0, 16.0))
-            elif random.random() < 0.012:
-                self.direction = random.choice((-1, 1))
-                self._enter_state("walk", random.uniform(3.0, 8.0))
         elif self.state == "walk" and elapsed >= self.state_duration:
             self._enter_state("idle", 0.0)
 
@@ -425,6 +628,20 @@ class PetWindow:
         role_frames = self.frames[self.state]
         frame = role_frames[self.frame_index % len(role_frames)]
         self.photo_image = frame
+        self._present_frame(frame)
+        if self.next_frame_at <= 0.0:
+            self.next_frame_at = now + self.frame_interval
+        elif now >= self.next_frame_at:
+            elapsed = now - self.next_frame_at
+            steps = 1 + int(elapsed / self.frame_interval)
+            self.frame_index += steps
+            self.next_frame_at += steps * self.frame_interval
+        self.root.after(self.tick_ms, self._tick)
+
+    def _present_frame(self, frame) -> None:
+        if self.native_alpha and self.layered_renderer is not None:
+            self.layered_renderer.update(frame)
+            return
         if self.image_item is None:
             self.image_item = self.canvas.create_image(
                 0,
@@ -435,17 +652,12 @@ class PetWindow:
             )
         else:
             self.canvas.itemconfig(self.image_item, image=frame)
-        if self.next_frame_at <= 0.0:
-            self.next_frame_at = now + self.frame_interval
-        elif now >= self.next_frame_at:
-            elapsed = now - self.next_frame_at
-            steps = 1 + int(elapsed / self.frame_interval)
-            self.frame_index += steps
-            self.next_frame_at += steps * self.frame_interval
-        self.root.after(self.tick_ms, self._tick)
 
     def close(self):
         try:
+            if self.layered_renderer is not None:
+                self.layered_renderer.close()
+                self.layered_renderer = None
             self.root.destroy()
         except Exception:
             pass

@@ -20,10 +20,30 @@ def _clean_alpha_edges(image, minimum_alpha: int = 8):
     useful semi-transparent fur while dropping only the very weakest noise.
     """
 
-    from PIL import Image
+    from PIL import Image, ImageChops, ImageFilter
 
     image = image.convert("RGBA")
-    alpha = image.getchannel("A").point(
+    alpha = image.getchannel("A")
+
+    # A few compatible image gateways return a green/chroma-key matte around
+    # otherwise transparent edges. Remove only green-dominant pixels that are
+    # adjacent to transparency, so legitimate colored fur inside the subject
+    # is not affected.
+    if alpha.getextrema() != (0, 0):
+        red, green, blue, _ = image.split()
+        transparent = alpha.point(lambda value: 255 if value == 0 else 0)
+        edge = transparent.filter(ImageFilter.MaxFilter(5))
+        edge = ImageChops.multiply(edge, alpha.point(lambda value: 255 if value else 0))
+        strongest_rgb = ImageChops.lighter(red, blue)
+        green_excess = ImageChops.subtract(green, strongest_rgb)
+        green_mask = green_excess.point(lambda value: 255 if value >= 18 else 0)
+        green_edge = ImageChops.multiply(edge, green_mask)
+        alpha = ImageChops.subtract(
+            alpha,
+            green_edge.point(lambda value: 255 if value >= 128 else 0),
+        )
+
+    alpha = alpha.point(
         lambda value: 0 if value < minimum_alpha else value
     )
     image.putalpha(alpha)
@@ -110,6 +130,37 @@ def subject_bbox(image) -> Optional[Tuple[int, int, int, int]]:
     """Return the visible subject bounds for an RGBA image."""
 
     return image.convert("RGBA").getchannel("A").getbbox()
+
+
+def has_usable_transparency(source_path: Path, corner_alpha: int = 8) -> bool:
+    """Return whether an image has a believable transparent canvas.
+
+    A PNG file extension is not enough: compatible gateways sometimes return
+    an RGB image with a checkerboard or green matte painted into it. Require a
+    real alpha channel, at least one transparent pixel, and transparent
+    corners so the AI cleanup pass can decide whether another attempt is
+    needed.
+    """
+
+    from PIL import Image
+
+    try:
+        with Image.open(source_path) as source:
+            if "A" not in source.getbands():
+                return False
+            alpha = source.convert("RGBA").getchannel("A")
+            minimum, maximum = alpha.getextrema()
+            if minimum == 255 or maximum == 0:
+                return False
+            corners = [
+                alpha.getpixel((0, 0)),
+                alpha.getpixel((max(0, alpha.width - 1), 0)),
+                alpha.getpixel((0, max(0, alpha.height - 1))),
+                alpha.getpixel((max(0, alpha.width - 1), max(0, alpha.height - 1))),
+            ]
+            return all(value <= corner_alpha for value in corners)
+    except (OSError, ValueError):
+        return False
 
 
 def _contact_sheet_grids(frame_count: int) -> List[Tuple[int, int]]:

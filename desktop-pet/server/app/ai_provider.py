@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -73,24 +74,36 @@ class OpenAICompatibleImageProvider:
 
         output_paths: List[Path] = []
         errors: List[str] = []
+        continuity_reference: Optional[Path] = None
         # Match the stable cutout workflow: one pose, one edit request, one
         # returned image. Avoid n=count because compatible gateways often
         # reject it or turn the response into a contact sheet.
         for index in range(count):
             target = output_dir / f"{role}_{index}.png"
+            request_references = [continuity_reference] if continuity_reference else reference_paths
             try:
                 await self.generate_action_frame(
-                    reference_paths,
+                    request_references,
                     role,
                     target,
-                    identity_reference=None,
+                    identity_reference=identity_reference,
                     frame_index=index,
                     frame_count=count,
                     pose_consistency=keep_consistency,
+                    continuity_reference=continuity_reference is not None,
                 )
+                continuity_reference = target
             except Exception as error:
                 errors.append(f"{role}_{index}: {error}")
-                continue
+                # Keep the cycle length stable when one provider request fails.
+                # Repeating the previous frame is less disruptive than dropping
+                # a pose and shifting all later frames left.
+                fallback = continuity_reference or (reference_paths[-1] if reference_paths else None)
+                if fallback and fallback.exists():
+                    shutil.copy2(fallback, target)
+                    continuity_reference = target
+                else:
+                    continue
             output_paths.append(target)
 
         if not output_paths and errors:
@@ -106,6 +119,7 @@ class OpenAICompatibleImageProvider:
         frame_index: int = 0,
         frame_count: Optional[int] = None,
         pose_consistency: Optional[bool] = None,
+        continuity_reference: bool = False,
     ) -> Path:
         """Generate exactly one transparent action frame."""
 
@@ -130,6 +144,7 @@ class OpenAICompatibleImageProvider:
             transparent_background=transparent_background,
             frame_index=index,
             pose=pose,
+            continuity_reference=continuity_reference,
         )
         reference_paths = self._reference_paths(references, identity_reference)
         reference_paths = reference_paths[: self.settings.ai_max_references]
@@ -238,7 +253,7 @@ class OpenAICompatibleImageProvider:
         endpoint = "/images/edits" if references else "/images/generations"
         url = f"{self.settings.ai_api_base_url}{endpoint}"
         headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
-        count = max(1, min(12, int(frame_count or self.settings.ai_frame_count)))
+        count = max(1, min(24, int(frame_count or self.settings.ai_frame_count)))
         base_data = {
             "model": self.settings.ai_image_model,
             "prompt": prompt,
@@ -292,6 +307,7 @@ class OpenAICompatibleImageProvider:
         transparent_background: Optional[bool] = None,
         frame_index: Optional[int] = None,
         pose: Optional[str] = None,
+        continuity_reference: bool = False,
     ) -> str:
         action = ROLE_PROMPTS.get(role, ROLE_PROMPTS["idle"])
         count = frame_count_for_role(role, frame_count)
@@ -326,12 +342,21 @@ class OpenAICompatibleImageProvider:
                 if pose_consistency
                 else "Keep the animal recognizable, full-body, and consistent with the reference images."
             )
+        continuity = (
+            " The last input image is the immediately preceding animation frame. Treat it as the temporal "
+            "anchor: make only the smallest pose change needed for this frame, preserve the same silhouette "
+            "and landmarks, and never redesign the pet."
+            if continuity_reference
+            else ""
+        )
         background = (
             "Output settings: transparent background enabled. Prefer the image model's native "
             "transparent-background mode and return a PNG with a fully transparent background, "
             "a real RGBA color model, and a clean alpha channel around the pet. Isolate only the "
             "pet; do not place it in a scene and do not draw a room, floor, white/green backdrop, "
-            "checkerboard pattern, or cast shadow. If this endpoint cannot encode alpha, use one "
+            "checkerboard pattern, chroma-key green, or cast shadow. If the input or model draws a fake "
+            "checkerboard pattern, treat it as a real background to remove, never as transparency. If this "
+            "endpoint cannot encode alpha, use one "
             "perfectly uniform white background (#FFFFFF) with no texture or shadow as a compatibility "
             "fallback; never invent a detailed background."
         )
@@ -344,7 +369,7 @@ class OpenAICompatibleImageProvider:
             "Use case: identity-preserve. Asset type: a frame-by-frame 2D desktop-pet animation. "
             "Input images: Image 1 is the identity reference; later images are pose references only. "
             "Create exactly the same pet shown in the reference images. "
-            f"{consistency} "
+            f"{consistency}{continuity} "
             "Show the pet full body, centered, in a clean game-sprite style. "
             "Keep the subject at the same pixel scale in every frame: the body occupies the same "
             "approximate area, the horizontal center stays fixed, and the feet stay on the same "
@@ -365,14 +390,15 @@ class OpenAICompatibleImageProvider:
                 "but the transparent-background output setting still applies."
             )
         return (
-            "Image editing task: remove the entire background from this exact pet photo before "
-            "any animation is generated. Preserve the pet's identity, species, fur or feather "
+            "Image editing task: remove the entire background from this exact image before it is "
+            "used as a desktop-pet asset. Preserve the pet's identity, species, fur or feather "
             "colors, markings, face, body shape, pose, proportions, crop, camera angle, and "
             "lighting. Do not redraw, stylize, rotate, retouch, or add details. "
             "Output settings: transparent background enabled. Return exactly one PNG with a real "
             "RGBA color model and a clean alpha channel containing only the pet. Remove the room, "
             "floor, furniture, people, leash, text, watermark, and all shadows. Do not use a white, "
-            "green, or checkerboard background. If native alpha encoding is unavailable, use one "
+            "green, or checkerboard background. If the input contains a fake checkerboard or chroma-key "
+            "matte, remove those pixels instead of preserving them. If native alpha encoding is unavailable, use one "
             "perfectly uniform white background (#FFFFFF) with no texture or shadow as a compatibility "
             "fallback; never invent a scene."
             + compatibility

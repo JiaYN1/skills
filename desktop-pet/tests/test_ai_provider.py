@@ -128,6 +128,8 @@ class ActionFrameRequestFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(requests), 3)
         self.assertTrue(all("exactly one separate PNG frame" in item[0] for item in requests))
         self.assertEqual([item[2].name for item in requests], ["walk_0.png", "walk_1.png", "walk_2.png"])
+        self.assertEqual([path.name for path in requests[1][1]], ["identity.png", "walk_0.png"])
+        self.assertIn("immediately preceding animation frame", requests[1][0])
 
 
 if __name__ == "__main__":

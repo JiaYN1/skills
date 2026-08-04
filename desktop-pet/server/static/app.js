@@ -38,8 +38,8 @@ function fillAiSettings(values) {
   document.querySelector("#ai-frame-count").value = values.frame_count || 4;
   document.querySelector("#ai-max-references").value = values.max_references || 2;
   document.querySelector("#ai-timeout").value = values.timeout_seconds || 180;
-  document.querySelector("#ai-walk-frame-count").value = values.walk_frame_count || 12;
-  document.querySelector("#ai-sleep-frame-count").value = values.sleep_frame_count || 10;
+  document.querySelector("#ai-walk-frame-count").value = values.walk_frame_count || 16;
+  document.querySelector("#ai-sleep-frame-count").value = values.sleep_frame_count || 12;
   document.querySelector("#ai-animation-fps").value = values.animation_fps || 12;
   document.querySelector("#ai-animation-mode").value = values.animation_mode || "hybrid";
   document.querySelector("#ai-pose-consistency").checked = values.pose_consistency !== false;

@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pet_assets import normalize_pet_image, normalize_pet_sequence
+from pet_assets import has_usable_transparency, normalize_pet_image, normalize_pet_sequence
 from pet_animation import write_animation_bundle
 from pet_common import ROLES, assign_roles, safe_filename
 
@@ -28,6 +28,20 @@ ROLE_ANCHORS = {
     "sleep": "center",
     "react": "bottom",
 }
+
+
+async def ai_cutout_frame(provider: OpenAICompatibleImageProvider, source: Path, output_path: Path) -> Path:
+    """Run the AI cutout pass and retry once when alpha is still missing."""
+
+    await provider.remove_background(source, output_path)
+    if has_usable_transparency(output_path):
+        return output_path
+
+    retry_path = output_path.with_name(f"{output_path.stem}_retry{output_path.suffix}")
+    await provider.remove_background(output_path, retry_path)
+    if has_usable_transparency(retry_path):
+        return retry_path
+    return output_path
 
 
 async def build_pet_package(
@@ -83,7 +97,26 @@ async def build_pet_package(
             ai_error_count += 1
             progress(10 + role_index * 18, f"AI 生成失败，{_role_label(role)}使用照片动画：{error}")
 
-        sources = generated or role_inputs[role] or [normalized_inputs[0]]
+        if generated:
+            # Run every AI action frame through the same AI cutout workflow as
+            # the upload preview. This is intentionally a second pass for
+            # models/gateways that return an RGB checkerboard or chroma-key
+            # matte even when the prompt requests alpha.
+            cleaned_sources: List[Path] = []
+            for frame_index, source in enumerate(generated):
+                cleaned_path = ai_dir / role / f"{role}_{frame_index}_cutout.png"
+                try:
+                    cleaned_sources.append(await ai_cutout_frame(provider, source, cleaned_path))
+                except Exception as error:
+                    ai_error_count += 1
+                    progress(
+                        10 + role_index * 18,
+                        f"{_role_label(role)}第 {frame_index + 1} 帧去背景失败，保留原帧：{error}",
+                    )
+                    cleaned_sources.append(source)
+            sources = cleaned_sources
+        else:
+            sources = role_inputs[role] or [normalized_inputs[0]]
         ai_frame_total += len(generated)
         selected_sources = sources[: role_frame_count]
         destinations = [assets_dir / f"{role}_{index}.png" for index in range(len(selected_sources))]
@@ -108,6 +141,11 @@ async def build_pet_package(
                 {
                     "asset_path": f"package/{config_assets[role][index]}",
                     "source_path": _relative_job_path(job_dir, source),
+                    "raw_source_path": (
+                        _relative_job_path(job_dir, generated[index])
+                        if generated and index < len(generated)
+                        else _relative_job_path(job_dir, source)
+                    ),
                     "role": role,
                     "index": index,
                     "frame_count": role_frame_count,
@@ -184,8 +222,8 @@ def _role_label(role: str) -> str:
 def _frame_count_for(settings: Settings, role: str) -> int:
     configured = getattr(settings, "frame_count_for_role", None)
     if callable(configured):
-        return max(1, min(12, int(configured(role))))
-    return max(1, min(12, int(getattr(settings, "ai_frame_count", 8))))
+        return max(1, min(24, int(configured(role))))
+    return max(1, min(24, int(getattr(settings, "ai_frame_count", 8))))
 
 
 def _relative_job_path(job_dir: Path, source: Path) -> str:

@@ -19,11 +19,26 @@ SERVER_URL = os.getenv("PET_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN", "")
 POLL_SECONDS = max(2, int(os.getenv("POLL_SECONDS", "5")))
 PYINSTALLER_PIL_OPTIONS = [
-    "--collect-all",
+    "--collect-binaries",
     "PIL",
     "--hidden-import",
+    "PIL.Image",
+    "--hidden-import",
+    "PIL.ImageEnhance",
+    "--hidden-import",
+    "PIL.ImageTk",
+    "--hidden-import",
     "PIL._imaging",
+    "--hidden-import",
+    "PIL._imagingtk",
 ]
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def main() -> None:
@@ -107,14 +122,15 @@ def process_job(job) -> None:
 def build_exe(package: Path, pet_name: str) -> Path:
     safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in pet_name).strip(" .") or "my-pet"
     dist = package / "dist"
-    work = package / "build"
     spec = package / "spec"
+    configured_cache = os.getenv("PET_PYINSTALLER_CACHE", "").strip()
+    work = (Path(configured_cache) / safe_name) if configured_cache else package / "build"
+    work.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
-        "--clean",
         "--onefile",
         "--noconsole",
         *PYINSTALLER_PIL_OPTIONS,
@@ -131,6 +147,8 @@ def build_exe(package: Path, pet_name: str) -> Path:
         "--add-data",
         f"{package / 'assets'};assets",
     ]
+    if _env_bool("PYINSTALLER_CLEAN"):
+        command.insert(4, "--clean")
     for metadata_name in ("animation.json", "skeleton.json"):
         metadata_path = package / metadata_name
         if metadata_path.exists():

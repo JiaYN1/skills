@@ -18,10 +18,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 ANIMATION_ROLES = ("idle", "walk", "sleep", "react")
 DEFAULT_ANIMATION_FPS = 12
+MAX_FRAME_COUNT = 24
 DEFAULT_FRAME_COUNTS = {
     "idle": 8,
-    "walk": 12,
-    "sleep": 10,
+    "walk": 16,
+    "sleep": 12,
     "react": 6,
 }
 ANIMATION_MODES = ("png", "skeleton", "hybrid")
@@ -92,7 +93,7 @@ def frame_count_for_role(role: str, requested: Optional[int] = None) -> int:
         count = int(requested)
     except (TypeError, ValueError):
         count = default
-    return max(1, min(12, count))
+    return max(1, min(MAX_FRAME_COUNT, count))
 
 
 def pose_plan_for(role: str, frame_count: Optional[int] = None) -> List[str]:
@@ -100,7 +101,12 @@ def pose_plan_for(role: str, frame_count: Optional[int] = None) -> List[str]:
 
     count = frame_count_for_role(role, frame_count)
     plan = list(_POSE_PLANS.get(role, _POSE_PLANS["idle"]))
-    return [plan[index % len(plan)] for index in range(count)]
+    if count == len(plan):
+        return plan
+    # Sample the authored cycle evenly instead of appending the first few
+    # poses when a longer sequence is requested. This keeps the last pose
+    # close to the cycle boundary and works better with sequential AI frames.
+    return [plan[round(index * len(plan) / count) % len(plan)] for index in range(count)]
 
 
 def _sequence_frame_paths(role: str, frame_paths: Sequence[str]) -> List[str]:

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from .ai_provider import ImageGenerationError, OpenAICompatibleImageProvider
 from .config import settings
-from .package_builder import ROLE_ANCHORS, build_pet_package
+from .package_builder import ROLE_ANCHORS, ai_cutout_frame, build_pet_package
 from .storage import JobStore
 
 
@@ -44,8 +44,8 @@ class AISettingsUpdate(BaseModel):
     pose_consistency: Optional[bool] = None
     animation_mode: Optional[str] = None
     animation_fps: Optional[int] = Field(default=None, ge=1, le=60)
-    walk_frame_count: Optional[int] = Field(default=None, ge=1, le=12)
-    sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=12)
+    walk_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
+    sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
 
 
 class GenerateFromPreviewRequest(BaseModel):
@@ -509,6 +509,13 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
             frame_count=frame_count,
             pose_consistency=getattr(settings, "pose_consistency", True),
         )
+        cleaned_path = job_dir / "ai" / role / f"{role}_{index}_cutout.png"
+        try:
+            replacement_source = await ai_cutout_frame(provider, raw_path, cleaned_path)
+        except Exception:
+            # The normalizer still has a simple connected-background fallback;
+            # keep the existing resource usable if the extra AI pass fails.
+            replacement_source = raw_path
 
         all_meta = [
             dict(item)
@@ -520,7 +527,8 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
         for item in all_meta:
             if item.get("role") == role:
                 if int(item.get("index", -1)) == index:
-                    item["source_path"] = _relative_job_path(job_dir, raw_path)
+                    item["source_path"] = _relative_job_path(job_dir, replacement_source)
+                    item["raw_source_path"] = _relative_job_path(job_dir, raw_path)
                 role_meta.append(item)
             updated_meta.append(item)
         role_meta.sort(key=lambda item: int(item.get("index", 0)))

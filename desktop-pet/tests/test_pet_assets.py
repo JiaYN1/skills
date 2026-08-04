@@ -99,6 +99,33 @@ class PetAssetTests(unittest.TestCase):
                 self.assertEqual(normalized.mode, "RGBA")
                 self.assertEqual(normalized.getpixel((0, 0))[3], 0)
 
+    def test_normalize_clears_green_chroma_edge_next_to_alpha(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "green-matte.png"
+            destination = root / "assets" / "frame.png"
+            image = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+            for x in range(25, 55):
+                for y in range(20, 60):
+                    image.putpixel((x, y), (190, 80, 60, 255))
+            image.putpixel((24, 40), (10, 230, 40, 255))
+            image.save(source)
+
+            normalize_pet_sequence(
+                [source],
+                [destination],
+                canvas_size=64,
+                background_mode="none",
+            )
+
+            with Image.open(destination) as normalized:
+                green_pixels = [
+                    pixel
+                    for pixel in normalized.convert("RGBA").getdata()
+                    if pixel[3] > 0 and pixel[1] > pixel[0] + 30 and pixel[1] > pixel[2] + 20
+                ]
+                self.assertEqual(green_pixels, [])
+
     def test_split_contact_sheet_returns_individual_frames(self):
         from PIL import ImageDraw
 

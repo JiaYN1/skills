@@ -14,10 +14,10 @@ from pet_animation import (
 
 class PetAnimationTests(unittest.TestCase):
     def test_smooth_defaults_have_enough_action_frames(self):
-        self.assertEqual(DEFAULT_FRAME_COUNTS["walk"], 12)
-        self.assertEqual(DEFAULT_FRAME_COUNTS["sleep"], 10)
-        self.assertEqual(len(pose_plan_for("walk")), 12)
-        self.assertEqual(len(pose_plan_for("sleep")), 10)
+        self.assertEqual(DEFAULT_FRAME_COUNTS["walk"], 16)
+        self.assertEqual(DEFAULT_FRAME_COUNTS["sleep"], 12)
+        self.assertEqual(len(pose_plan_for("walk")), 16)
+        self.assertEqual(len(pose_plan_for("sleep")), 12)
 
     def test_walk_and_sleep_have_ordered_pose_plans(self):
         walk = pose_plan_for("walk", 8)

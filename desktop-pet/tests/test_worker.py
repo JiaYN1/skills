@@ -46,10 +46,16 @@ class WorkerBuildCommandTests(unittest.TestCase):
 
             self.assertEqual(result, executable)
             command = run.call_args_list[0].args[0]
-            collect_index = command.index("--collect-all")
-            hidden_index = command.index("--hidden-import")
+            collect_index = command.index("--collect-binaries")
             self.assertEqual(command[collect_index + 1], "PIL")
-            self.assertEqual(command[hidden_index + 1], "PIL._imaging")
+            hidden_imports = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--hidden-import"
+            ]
+            self.assertIn("PIL._imaging", hidden_imports)
+            self.assertIn("PIL.ImageTk", hidden_imports)
+            self.assertNotIn("--clean", command)
             self.assertEqual(run.call_args_list[1].args[0][-1], "--self-test")
 
 

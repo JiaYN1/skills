@@ -46,8 +46,9 @@ class Settings:
     pose_consistency: bool = True
     animation_mode: str = "hybrid"
     animation_fps: int = 12
-    walk_frame_count: int = 12
-    sleep_frame_count: int = 10
+    walk_frame_count: int = 16
+    sleep_frame_count: int = 12
+    animation_defaults_version: int = 2
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,8 +79,8 @@ class Settings:
             pose_consistency=_env_bool("POSE_CONSISTENCY", True),
             animation_mode=_animation_mode(os.getenv("ANIMATION_MODE", "hybrid")),
             animation_fps=max(1, min(60, _env_int("ANIMATION_FPS", 12))),
-            walk_frame_count=max(1, min(12, _env_int("WALK_FRAME_COUNT", 12))),
-            sleep_frame_count=max(1, min(12, _env_int("SLEEP_FRAME_COUNT", 10))),
+            walk_frame_count=max(1, min(24, _env_int("WALK_FRAME_COUNT", 16))),
+            sleep_frame_count=max(1, min(24, _env_int("SLEEP_FRAME_COUNT", 12))),
         )
         result._load_runtime_overrides()
         return result
@@ -97,7 +98,18 @@ class Settings:
             return
         if not isinstance(values, dict):
             return
+        legacy_frame_defaults = (
+            values.get("animation_defaults_version") != self.animation_defaults_version
+            and values.get("walk_frame_count") == 12
+            and values.get("sleep_frame_count") == 10
+        )
         self._apply_runtime_values(values)
+        # The previous release persisted 12/10 as its defaults. Migrate only
+        # that exact unversioned pair so an explicit newer configuration is
+        # never overwritten.
+        if legacy_frame_defaults:
+            self.walk_frame_count = 16
+            self.sleep_frame_count = 12
 
     def _apply_runtime_values(self, values: Dict[str, Any]) -> None:
         if isinstance(values.get("ai_enabled"), bool):
@@ -121,9 +133,9 @@ class Settings:
         if isinstance(values.get("animation_fps"), int):
             self.animation_fps = max(1, min(60, values["animation_fps"]))
         if isinstance(values.get("walk_frame_count"), int):
-            self.walk_frame_count = max(1, min(12, values["walk_frame_count"]))
+            self.walk_frame_count = max(1, min(24, values["walk_frame_count"]))
         if isinstance(values.get("sleep_frame_count"), int):
-            self.sleep_frame_count = max(1, min(12, values["sleep_frame_count"]))
+            self.sleep_frame_count = max(1, min(24, values["sleep_frame_count"]))
 
     def _runtime_values(self) -> Dict[str, Any]:
         return {
@@ -139,6 +151,7 @@ class Settings:
             "animation_fps": self.animation_fps,
             "walk_frame_count": self.walk_frame_count,
             "sleep_frame_count": self.sleep_frame_count,
+            "animation_defaults_version": self.animation_defaults_version,
         }
 
     def _persist_runtime_values(self) -> None:
@@ -196,9 +209,9 @@ class Settings:
         if values.get("animation_fps") is not None:
             self.animation_fps = max(1, min(60, int(values["animation_fps"])))
         if values.get("walk_frame_count") is not None:
-            self.walk_frame_count = max(1, min(12, int(values["walk_frame_count"])))
+            self.walk_frame_count = max(1, min(24, int(values["walk_frame_count"])))
         if values.get("sleep_frame_count") is not None:
-            self.sleep_frame_count = max(1, min(12, int(values["sleep_frame_count"])))
+            self.sleep_frame_count = max(1, min(24, int(values["sleep_frame_count"])))
 
         self._persist_runtime_values()
         return self.ai_public()

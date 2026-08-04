@@ -44,8 +44,8 @@ AI_IMAGE_MODEL=gpt-image-1
 POSE_CONSISTENCY=true
 ANIMATION_MODE=hybrid
 ANIMATION_FPS=12
-WALK_FRAME_COUNT=12
-SLEEP_FRAME_COUNT=10
+WALK_FRAME_COUNT=16
+SLEEP_FRAME_COUNT=12
 ```
 
 也可以把 `AI_API_BASE_URL` 指向内部网关或其他兼容服务。服务端会优先请求图片编辑接口 `/images/edits`，没有参考图时使用 `/images/generations`，并兼容 base64 与 URL 两种响应。
@@ -54,15 +54,15 @@ AI 生成会把用户图片发送到配置的图像服务；生产环境应补�
 
 ## 动画输出
 
-`hybrid` 是默认格式：资源包同时包含透明逐帧 PNG、`animation.json` 和 `skeleton.json`。走动默认使用 12 个细分接触/下压/经过/抬升姿态，睡觉默认使用 10 个呼吸与轻微抽动姿态；每个动作可以在管理面板中设置 1-12 帧。`skeleton.json` 是 sprite-backed root rig：它保存 root、body、head、前后腿和尾巴的时间线，适合后续接入真正的部位分割/蒙皮引擎。
+`hybrid` 是默认格式：资源包同时包含透明逐帧 PNG、`animation.json` 和 `skeleton.json`。走动默认使用 16 个细分接触/下压/经过/抬升姿态，睡觉默认使用 12 个呼吸与轻微抽动姿态；每个动作可以在管理面板中设置 1-24 帧。`skeleton.json` 是 sprite-backed root rig：它保存 root、body、head、前后腿和尾巴的时间线，适合后续接入真正的部位分割/蒙皮引擎。
 
-背景移除优先由启用透明背景的 AI 提示词执行。服务端不会安装或调用本地分割模型；兼容网关偶尔返回不透明动作帧时，服务端会用 Pillow 尝试移除连接在边缘的简单纯色背景，不会因为单帧缺 alpha 让整单失败，也不使用 rembg。复杂背景仍建议更换支持原生透明输出的图像模型或网关。
+背景移除优先由启用透明背景的 AI 提示词执行。上传图和每一张 AI 动作帧都会经过 AI 去背景；服务端不会安装或调用本地分割模型。兼容网关仍返回不透明图片时，Pillow 只作为简单边缘清理回退，不会因为单帧缺 alpha 让整单失败，也不使用 rembg。复杂背景仍建议更换支持原生透明输出的图像模型或网关。
 
-动作帧现在按“一个姿态、一个请求、一个 PNG”逐帧生成，不再依赖一次请求 `n=8/12` 后拆分 contact sheet；保留 contact sheet 识别逻辑用于兼容旧任务和其他网关返回。已生成的旧资源包需要重新生成。PNG 本身是逐帧资源，浏览器页面会展示全部帧，动画预览也可运行资源包中的 `pet_runtime.py` 或打包后的 exe。
+动作帧现在按“一个姿态、一个请求、一个 PNG”逐帧生成，不再依赖一次请求 `n=8/12` 后拆分 contact sheet；后续请求会参考上一帧，失败帧会保留序列位置。已生成的旧资源包需要重新生成。PNG 本身是逐帧资源，浏览器页面会展示全部帧，动画预览也可运行资源包中的 `pet_runtime.py` 或打包后的 exe。
 
 提示词会明确启用透明背景：只保留宠物主体，优先输出带真实透明 alpha 通道的 RGBA PNG，不要白底、绿底、棋盘格、房间、地面或阴影。`gpt-image-1`/`gpt-image-1.5` 会请求透明 PNG；`gpt-image-2` 为兼容接口不会发送其不接受的 `background=transparent` 参数，但仍通过提示词要求透明 alpha，并在必要时约定无纹理纯白兼容背景供服务端清理。
 
-动画默认使用走动 12 帧、睡觉 10 帧、12 FPS。服务端会把同一动作的所有帧统一到相同的透明画布、主体比例、水平中心和落地基线；AI 提示词也会锁定镜头、缩放、光线与脚底位置，减少逐帧漂移。Windows runtime 更新同一个 Tk 图片对象，不再删除/重建画布项，避免透明窗口闪烁。
+动画默认使用走动 16 帧、睡觉 12 帧、12 FPS。服务端会把同一动作的所有帧统一到相同的透明画布、主体比例、水平中心和落地基线；AI 提示词也会锁定镜头、缩放、光线与脚底位置，并把上一帧作为连续性参考。Windows runtime 在 Windows 上使用原生 per-pixel alpha 分层窗口，避免色键透明导致的绿色边缘和闪烁。常态不随机走动，走动由右键菜单触发，点击宠物触发反应；闲置超时后进入睡眠并保持到下一次互动。
 
 ## Windows Worker
 
@@ -79,5 +79,7 @@ python worker.py
 ```
 
 Worker 只通过带 token 的接口领取任务、下载资源包和上传 exe，不需要把 Windows 主机暴露给公网以外的端口。建议用 Windows 任务计划程序或 NSSM 将 Worker 作为后台服务运行。
+
+EXE 构建默认不再使用 `--clean`，并只收集运行时需要的 Pillow 模块和二进制。需要排查 PyInstaller 缓存时可设置 `PYINSTALLER_CLEAN=true`；设置 `PET_PYINSTALLER_CACHE` 可指定持久构建目录。
 
 Windows 端安装脚本、连接自检和 AI 交接提示见项目根目录的 [WINDOWS_WORKER_HANDOFF.md](../WINDOWS_WORKER_HANDOFF.md)。
