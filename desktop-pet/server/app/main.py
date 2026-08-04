@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import shutil
 import sys
+import zipfile
 from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from .ai_provider import ImageGenerationError, OpenAICompatibleImageProvider
 from .config import settings
-from .package_builder import build_pet_package
+from .package_builder import ROLE_ANCHORS, build_pet_package
 from .storage import JobStore
 
 
@@ -23,7 +24,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pet_assets import normalize_pet_image  # noqa: E402
+from pet_assets import normalize_pet_image, normalize_pet_sequence  # noqa: E402
+from pet_common import ROLES, assign_roles  # noqa: E402
 
 store = JobStore(settings.data_dir)
 provider = OpenAICompatibleImageProvider(settings)
@@ -224,6 +226,76 @@ def preview_job_asset(job_id: str, asset_path: str):
     return FileResponse(str(target), media_type=media_type)
 
 
+@app.post("/api/jobs/{job_id}/previews/cutout/{index}/regenerate")
+def regenerate_cutout_preview(
+    job_id: str,
+    index: int,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if record.get("status") != "preview_ready":
+        raise HTTPException(409, "当前任务不在可重新生成去背景预览的状态")
+    if index < 0 or index >= int(record.get("photo_count", 0)):
+        raise HTTPException(404, "预览图片不存在")
+
+    preview_path = f"prepared/reference_{index}.png"
+    if preview_path not in record.get("preview_paths", []):
+        raise HTTPException(404, "预览图片不存在")
+    source = _input_photo_path(job_id, index)
+    if source is None:
+        raise HTTPException(404, "原始图片不存在")
+
+    store.update(
+        job_id,
+        status="preview_regenerating",
+        progress=50,
+        message=f"正在重新生成第 {index + 1} 张去背景预览",
+    )
+    background_tasks.add_task(_run_cutout_regeneration, job_id, index, source)
+    return _public_job(store.read(job_id))
+
+
+@app.post("/api/jobs/{job_id}/previews/resource/{role}/{index}/regenerate")
+def regenerate_resource_preview(
+    job_id: str,
+    role: str,
+    index: int,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if record.get("status") != "ready":
+        raise HTTPException(409, "请在动作资源生成完成后重新生成单帧")
+    if role not in ROLES or index < 0:
+        raise HTTPException(404, "动作帧不存在")
+    meta = _resource_frame_meta(record, role, index)
+    if meta is None:
+        raise HTTPException(404, "动作帧不存在或不支持重新生成")
+
+    prepared_paths = [
+        store.job_dir(job_id) / relative
+        for relative in record.get("preview_paths", [])
+    ]
+    if not prepared_paths or not all(path.exists() for path in prepared_paths):
+        raise HTTPException(409, "去背景参考图不存在，请重新上传")
+
+    store.update(
+        job_id,
+        status="resource_regenerating",
+        progress=98,
+        message=f"正在重新生成 {role}_{index}.png",
+    )
+    background_tasks.add_task(_run_resource_regeneration, job_id, meta)
+    return _public_job(store.read(job_id))
+
+
 @app.post("/api/jobs/{job_id}/build-exe")
 def request_exe_build(job_id: str) -> Dict[str, Any]:
     """Queue the Windows build for an already generated resource package."""
@@ -387,6 +459,110 @@ async def _run_preparation(job_id: str, paths: List[Path]) -> None:
         )
 
 
+async def _run_cutout_regeneration(job_id: str, index: int, source: Path) -> None:
+    try:
+        prepared_dir = store.job_dir(job_id) / "prepared"
+        raw_path = prepared_dir / f"raw_{index}.png"
+        preview_path = prepared_dir / f"reference_{index}.png"
+        await provider.remove_background(source, raw_path)
+        _normalize_ai_preview(raw_path, preview_path)
+        record = store.read(job_id)
+        revision = int(record.get("preview_revision", 0)) + 1
+        store.update(
+            job_id,
+            status="preview_ready",
+            progress=100,
+            message=f"第 {index + 1} 张去背景预览已重新生成",
+            preview_revision=revision,
+            error="",
+        )
+    except Exception as error:
+        store.update(
+            job_id,
+            status="preview_ready",
+            progress=100,
+            message=f"重新生成去背景预览失败，已保留原图片：{str(error)[-2000:]}",
+            error=str(error)[-4000:],
+        )
+
+
+async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -> None:
+    try:
+        record = store.read(job_id)
+        role = str(target_meta["role"])
+        index = int(target_meta["index"])
+        frame_count = int(target_meta.get("frame_count") or 1)
+        job_dir = store.job_dir(job_id)
+        prepared_paths = [
+            job_dir / relative
+            for relative in record.get("preview_paths", [])
+        ]
+        role_inputs = assign_roles(prepared_paths)
+        identity_reference = prepared_paths[0]
+        raw_path = job_dir / "ai" / role / f"{role}_{index}.png"
+        await provider.generate_action_frame(
+            role_inputs[role],
+            role,
+            raw_path,
+            identity_reference=identity_reference,
+            frame_index=index,
+            frame_count=frame_count,
+            pose_consistency=getattr(settings, "pose_consistency", True),
+        )
+
+        all_meta = [
+            dict(item)
+            for item in record.get("resource_frame_meta", [])
+            if isinstance(item, dict)
+        ]
+        updated_meta: List[Dict[str, Any]] = []
+        role_meta: List[Dict[str, Any]] = []
+        for item in all_meta:
+            if item.get("role") == role:
+                if int(item.get("index", -1)) == index:
+                    item["source_path"] = _relative_job_path(job_dir, raw_path)
+                role_meta.append(item)
+            updated_meta.append(item)
+        role_meta.sort(key=lambda item: int(item.get("index", 0)))
+        if not role_meta:
+            raise ValueError("动作帧元数据不存在")
+
+        sources = [job_dir / str(item["source_path"]) for item in role_meta]
+        destinations = [job_dir / str(item["asset_path"]) for item in role_meta]
+        if not all(path.exists() for path in sources):
+            raise ValueError("动作帧参考文件不存在")
+        normalize_pet_sequence(
+            sources,
+            destinations,
+            canvas_size=320,
+            background_mode="simple",
+            anchor=ROLE_ANCHORS.get(role, "center"),
+            subject_scale=0.96,
+        )
+
+        package_dir = job_dir / "package"
+        zip_path = Path(record["package_path"])
+        _rebuild_package_archive(package_dir, zip_path)
+        revision = int(record.get("resource_preview_revision", 0)) + 1
+        store.update(
+            job_id,
+            status="ready",
+            progress=100,
+            message=f"{role}_{index}.png 已重新生成，资源包已更新",
+            resource_frame_meta=updated_meta,
+            resource_preview_revision=revision,
+            error="",
+        )
+    except Exception as error:
+        store.update(
+            job_id,
+            status="ready",
+            progress=100,
+            message=f"重新生成动作帧失败，已保留原资源：{str(error)[-2000:]}",
+            error=str(error)[-4000:],
+        )
+
+
 async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: bool) -> None:
     store.update(job_id, status="processing", progress=5, message="正在准备照片")
 
@@ -425,6 +601,7 @@ async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: 
             ai_error_count=result["ai_error_count"],
             animation_mode=result.get("animation_mode", settings.animation_mode),
             resource_preview_paths=result.get("resource_preview_paths", []),
+            resource_frame_meta=result.get("resource_frame_meta", []),
         )
     except Exception as error:
         store.update(job_id, status="failed", progress=0, message=str(error)[-4000:], error=str(error)[-4000:])
@@ -474,6 +651,43 @@ def _normalize_ai_preview(source: Path, destination: Path) -> None:
     )
 
 
+def _input_photo_path(job_id: str, index: int) -> Optional[Path]:
+    input_dir = store.job_dir(job_id) / "input"
+    candidates = sorted(input_dir.glob(f"photo_{index}.*"))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _resource_frame_meta(
+    record: Dict[str, Any],
+    role: str,
+    index: int,
+) -> Optional[Dict[str, Any]]:
+    for item in record.get("resource_frame_meta", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            item_index = int(item.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if item.get("role") == role and item_index == index:
+            return dict(item)
+    return None
+
+
+def _relative_job_path(job_dir: Path, source: Path) -> str:
+    try:
+        return source.resolve().relative_to(job_dir.resolve()).as_posix()
+    except ValueError:
+        return source.name
+
+
+def _rebuild_package_archive(package_dir: Path, zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in package_dir.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(package_dir).as_posix())
+
+
 def _artifact_path(record: Dict[str, Any]) -> Optional[Path]:
     path = record.get("artifact_path")
     return Path(path) if path else None
@@ -483,25 +697,88 @@ def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(record)
     preview_paths = list(result.pop("preview_paths", []))
     resource_preview_paths = list(result.pop("resource_preview_paths", []))
+    resource_frame_meta = [
+        item
+        for item in result.pop("resource_frame_meta", [])
+        if isinstance(item, dict)
+    ]
     result.pop("artifact_path", None)
     result.pop("package_path", None)
-    result["preview_images"] = _preview_entries(record["id"], preview_paths)
-    result["resource_preview_images"] = _preview_entries(
-        record["id"], resource_preview_paths
+    result["preview_images"] = _preview_entries(
+        record["id"],
+        preview_paths,
+        kind="cutout",
+        revision=int(record.get("preview_revision", 0)),
+    )
+    result["resource_preview_images"] = _resource_preview_entries(
+        record["id"],
+        resource_preview_paths,
+        resource_frame_meta,
+        revision=int(record.get("resource_preview_revision", 0)),
     )
     if record.get("artifact_path"):
         result["download_url"] = f"/api/jobs/{record['id']}/download"
     return result
 
 
-def _preview_entries(job_id: str, paths: List[str]) -> List[Dict[str, str]]:
-    return [
-        {
+def _preview_entries(
+    job_id: str,
+    paths: List[str],
+    kind: str,
+    revision: int = 0,
+) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for index, path in enumerate(paths):
+        url = f"/api/jobs/{job_id}/preview/{quote(path, safe='/')}"
+        if revision:
+            url += f"?v={revision}"
+        entries.append(
+            {
+                "name": Path(path).name,
+                "url": url,
+                "kind": kind,
+                "index": index,
+                "regenerate_url": f"/api/jobs/{job_id}/previews/cutout/{index}/regenerate",
+            }
+        )
+    return entries
+
+
+def _resource_preview_entries(
+    job_id: str,
+    paths: List[str],
+    metadata: List[Dict[str, Any]],
+    revision: int = 0,
+) -> List[Dict[str, Any]]:
+    metadata_by_path = {
+        str(item.get("asset_path")): item
+        for item in metadata
+        if item.get("asset_path")
+    }
+    entries: List[Dict[str, Any]] = []
+    for path in paths:
+        url = f"/api/jobs/{job_id}/preview/{quote(path, safe='/')}"
+        if revision:
+            url += f"?v={revision}"
+        item = metadata_by_path.get(path, {})
+        entry: Dict[str, Any] = {
             "name": Path(path).name,
-            "url": f"/api/jobs/{job_id}/preview/{quote(path, safe='/')}",
+            "url": url,
+            "kind": "resource",
         }
-        for path in paths
-    ]
+        if item.get("role") is not None and item.get("index") is not None:
+            role = str(item["role"])
+            index = int(item["index"])
+            entry.update(
+                role=role,
+                index=index,
+                regenerate_url=(
+                    f"/api/jobs/{job_id}/previews/resource/"
+                    f"{quote(role, safe='')}/{index}/regenerate"
+                ),
+            )
+        entries.append(entry)
+    return entries
 
 
 def _safe_name(value: str) -> str:

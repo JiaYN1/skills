@@ -61,6 +61,7 @@ async def build_pet_package(
 
     role_inputs = assign_roles(normalized_inputs)
     config_assets: Dict[str, List[str]] = {}
+    resource_frame_meta: List[Dict[str, object]] = []
     ai_frame_total = 0
     ai_error_count = 0
 
@@ -102,6 +103,16 @@ async def build_pet_package(
         config_assets[role] = [
             f"assets/{destination.name}" for destination in destinations
         ]
+        for index, (source, destination) in enumerate(zip(selected_sources, destinations)):
+            resource_frame_meta.append(
+                {
+                    "asset_path": f"package/{config_assets[role][index]}",
+                    "source_path": _relative_job_path(job_dir, source),
+                    "role": role,
+                    "index": index,
+                    "frame_count": role_frame_count,
+                }
+            )
 
     animation_mode = getattr(settings, "animation_mode", "hybrid")
     animation_fps = getattr(settings, "animation_fps", 10)
@@ -149,11 +160,7 @@ async def build_pet_package(
                 archive.write(path, path.relative_to(package_dir).as_posix())
 
     progress(88, "资源包已生成")
-    resource_preview_paths = [
-        f"package/{asset_path}"
-        for role in ROLES
-        for asset_path in config_assets.get(role, [])
-    ]
+    resource_preview_paths = [item["asset_path"] for item in resource_frame_meta]
     return {
         "package_dir": package_dir,
         "zip_path": zip_path,
@@ -161,6 +168,7 @@ async def build_pet_package(
         "ai_error_count": ai_error_count,
         "animation_mode": animation_manifest["mode"],
         "resource_preview_paths": resource_preview_paths,
+        "resource_frame_meta": resource_frame_meta,
     }
 
 
@@ -178,3 +186,10 @@ def _frame_count_for(settings: Settings, role: str) -> int:
     if callable(configured):
         return max(1, min(12, int(configured(role))))
     return max(1, min(12, int(getattr(settings, "ai_frame_count", 8))))
+
+
+def _relative_job_path(job_dir: Path, source: Path) -> str:
+    try:
+        return source.resolve().relative_to(job_dir.resolve()).as_posix()
+    except ValueError:
+        return source.name

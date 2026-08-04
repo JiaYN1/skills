@@ -49,7 +49,7 @@ function fillAiSettings(values) {
     : "尚未配置 API Key";
 }
 
-function renderPreviewImages(items, section, grid) {
+function renderPreviewImages(items, section, grid, canRegenerate) {
   grid.replaceChildren();
   if (!Array.isArray(items) || !items.length) {
     section.classList.add("hidden");
@@ -65,9 +65,39 @@ function renderPreviewImages(items, section, grid) {
     const caption = document.createElement("figcaption");
     caption.textContent = item.name || "预览图片";
     figure.append(image, caption);
+    if (item.regenerate_url) {
+      const actions = document.createElement("div");
+      actions.className = "preview-item-actions";
+      const regenerate = document.createElement("button");
+      regenerate.type = "button";
+      regenerate.className = "secondary preview-regenerate";
+      regenerate.textContent = "重新生成";
+      regenerate.disabled = !canRegenerate;
+      regenerate.addEventListener("click", () => regeneratePreview(item, regenerate));
+      actions.append(regenerate);
+      figure.append(actions);
+    }
     grid.append(figure);
   }
   section.classList.remove("hidden");
+}
+
+async function regeneratePreview(item, button) {
+  if (!currentJobId || !item.regenerate_url || button.disabled) return;
+  button.disabled = true;
+  submitButton.disabled = true;
+  confirmPreviewButton.disabled = true;
+  restartPreviewButton.disabled = true;
+  buildExeButton.disabled = true;
+  try {
+    const response = await fetch(item.regenerate_url, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "重新生成预览失败");
+    showProgress(payload);
+    await poll(currentJobId);
+  } catch (error) {
+    showError(error);
+  }
 }
 
 async function loadAiSettings() {
@@ -131,8 +161,18 @@ function showProgress(job) {
     download.classList.remove("hidden");
     download.textContent = job.artifact_kind === "exe" ? "下载 Windows exe" : "下载资源包 zip";
   }
-  renderPreviewImages(job.preview_images, previewSection, previewGrid);
-  renderPreviewImages(job.resource_preview_images, resourcePreviewSection, resourcePreviewGrid);
+  renderPreviewImages(
+    job.preview_images,
+    previewSection,
+    previewGrid,
+    job.status === "preview_ready",
+  );
+  renderPreviewImages(
+    job.resource_preview_images,
+    resourcePreviewSection,
+    resourcePreviewGrid,
+    job.status === "ready" && job.artifact_kind === "zip",
+  );
   confirmPreviewButton.disabled = job.status !== "preview_ready";
   restartPreviewButton.disabled = job.status !== "preview_ready";
   buildExeButton.disabled = !(

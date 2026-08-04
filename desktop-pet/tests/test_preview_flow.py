@@ -10,6 +10,15 @@ class PreviewFlowTests(unittest.TestCase):
             "status": "preview_ready",
             "preview_paths": ["prepared/reference_0.png"],
             "resource_preview_paths": ["package/assets/walk_0.png"],
+            "resource_frame_meta": [
+                {
+                    "asset_path": "package/assets/walk_0.png",
+                    "source_path": "ai/walk/walk_0.png",
+                    "role": "walk",
+                    "index": 0,
+                    "frame_count": 12,
+                }
+            ],
         }
 
         public = _public_job(record)
@@ -23,6 +32,14 @@ class PreviewFlowTests(unittest.TestCase):
         self.assertEqual(
             public["resource_preview_images"][0]["name"],
             "walk_0.png",
+        )
+        self.assertEqual(
+            public["preview_images"][0]["regenerate_url"],
+            "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/previews/cutout/0/regenerate",
+        )
+        self.assertEqual(
+            public["resource_preview_images"][0]["regenerate_url"],
+            "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/previews/resource/walk/0/regenerate",
         )
 
 

@@ -46,6 +46,8 @@ button:disabled { opacity: .55; cursor: wait; }
 }
 .preview-item img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 9px; background: rgba(255, 255, 255, .18); }
 .preview-item figcaption { margin-top: 7px; overflow: hidden; color: #6d6259; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.preview-item-actions { margin-top: 8px; }
+.preview-regenerate { width: 100%; padding: 8px 10px; font-size: 12px; }
 .preview-actions { margin-top: 16px; }
 .hidden { display: none; }
 .footer { margin-top: 18px; color: #8b7c70; font-size: 12px; }

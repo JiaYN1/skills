@@ -78,7 +78,7 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 如果只需要位图，可选择 `png`；如果只需要骨骼清单，可选择 `skeleton`。没有 AI 或 AI 失败时，资源包仍会使用照片和同一套骨骼/程序化动画兜底。
 
-部分 OpenAI-compatible 网关会忽略 `n=8` 的逐张返回约定，把 8 帧合成一张 4×2 或 2×4 的 contact sheet。服务端会在资源归一化前识别并拆成独立 PNG；因此旧任务中已经生成的“大图”不会自动修复，需要重新生成资源包。直接打开 PNG 或 ZIP 也只是静态资源，动画预览应运行 `pet_runtime.py` 或最终 exe。
+动作帧现在按“一个姿态、一个请求、一个 PNG”逐帧生成，避免兼容网关把 `n=8/12` 返回成 contact sheet；服务端仍保留拼图识别逻辑兼容旧任务。旧资源包需要重新生成。页面会展示生成的全部 PNG 帧，动画预览也可以运行 `pet_runtime.py` 或最终 exe。
 
 背景要求会写入 AI 提示词并启用透明背景：只保留宠物主体，优先输出带真实 alpha 通道的 RGBA PNG，不要白底、绿底、棋盘格、房间、地面或阴影。`gpt-image-2` 为兼容接口不会发送其不接受的 `background=transparent` 参数；如果网关仍返回不透明图片，服务端会尝试移除连接在边缘的纯色背景，不会因为单帧缺 alpha 让整单失败，也不使用 rembg。
 

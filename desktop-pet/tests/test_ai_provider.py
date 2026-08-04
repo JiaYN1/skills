@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from tempfile import TemporaryDirectory
 
 from server.app.ai_provider import OpenAICompatibleImageProvider
 
@@ -41,6 +44,15 @@ class ImageProviderModelTests(unittest.TestCase):
         self.assertEqual(attempts[0]["output_format"], "png")
         self.assertEqual(attempts[1]["n"], 1)
 
+    def test_single_image_retry_payloads_are_not_duplicated(self):
+        attempts = OpenAICompatibleImageProvider._request_attempts(
+            "gpt-image-2",
+            {"model": "gpt-image-2", "prompt": "pet", "n": 1},
+        )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertNotEqual(attempts[0], attempts[1])
+
     def test_transparent_model_prompt_requests_alpha(self):
         prompt = OpenAICompatibleImageProvider._prompt_for(
             "walk",
@@ -59,6 +71,63 @@ class ImageProviderModelTests(unittest.TestCase):
         self.assertIn("exactly one PNG", prompt)
         self.assertIn("Do not redraw", prompt)
         self.assertIn("never invent a scene", prompt)
+
+    def test_single_action_frame_prompt_requests_one_pose_only(self):
+        prompt = OpenAICompatibleImageProvider._prompt_for(
+            "walk",
+            frame_count=12,
+            pose_consistency=True,
+            transparent_background=False,
+            frame_index=3,
+            pose="left legs passing under the body",
+        )
+
+        self.assertIn("exactly one separate PNG frame", prompt)
+        self.assertIn("animation frame 4 of 12", prompt)
+        self.assertIn("left legs passing under the body", prompt)
+        self.assertIn("do not return a contact sheet", prompt)
+
+
+class ActionFrameRequestFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_action_frames_use_one_image_request_per_pose(self):
+        settings = SimpleNamespace(
+            ai_enabled=True,
+            ai_api_key="test-key",
+            ai_image_model="gpt-image-2",
+            ai_frame_count=3,
+            ai_max_references=2,
+            pose_consistency=True,
+        )
+        provider = OpenAICompatibleImageProvider(settings)
+        requests = []
+
+        async def fake_single_image(prompt, references, output_path):
+            requests.append((prompt, references, output_path))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"image")
+            return output_path
+
+        provider._generate_single_image = fake_single_image
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = root / "identity.png"
+            pose_reference = root / "pose.png"
+            identity.write_bytes(b"identity")
+            pose_reference.write_bytes(b"pose")
+
+            output = await provider.generate_action_frames(
+                [pose_reference],
+                "walk",
+                root / "frames",
+                identity_reference=identity,
+                frame_count=3,
+            )
+
+        self.assertEqual(len(output), 3)
+        self.assertEqual(len(requests), 3)
+        self.assertTrue(all("exactly one separate PNG frame" in item[0] for item in requests))
+        self.assertEqual([item[2].name for item in requests], ["walk_0.png", "walk_1.png", "walk_2.png"])
 
 
 if __name__ == "__main__":

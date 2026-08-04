@@ -16,7 +16,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pet_animation import frame_count_for_role, pose_plan_for  # noqa: E402
-from pet_assets import split_contact_sheet_bytes  # noqa: E402
 
 
 ROLE_PROMPTS = {
@@ -64,46 +63,77 @@ class OpenAICompatibleImageProvider:
             configured_count = role_count(role) if callable(role_count) else self.settings.ai_frame_count
         count = frame_count_for_role(role, configured_count)
         transparent_background = self._transparent_background_support(self.settings.ai_image_model)
-        prompt = self._prompt_for(
-            role,
-            frame_count=count,
-            pose_consistency=(
-                getattr(self.settings, "pose_consistency", True)
-                if pose_consistency is None
-                else bool(pose_consistency)
-            ),
-            transparent_background=transparent_background,
+        keep_consistency = (
+            getattr(self.settings, "pose_consistency", True)
+            if pose_consistency is None
+            else bool(pose_consistency)
         )
         reference_paths = self._reference_paths(references, identity_reference)
         reference_paths = reference_paths[: self.settings.ai_max_references]
-        response = await self._request(prompt, reference_paths, frame_count=count)
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ImageGenerationError("图像服务返回了无法识别的数据格式")
-        items = payload.get("data") or payload.get("images") or []
-        if not isinstance(items, list):
-            raise ImageGenerationError("图像服务返回了无法识别的数据格式")
 
         output_paths: List[Path] = []
-        async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
-            for index, item in enumerate(items):
-                image_bytes = await self._decode_item(client, item)
-                if not image_bytes:
-                    continue
-                frame_bytes = (
-                    split_contact_sheet_bytes(image_bytes, count)
-                    if len(items) == 1
-                    else [image_bytes]
+        errors: List[str] = []
+        # Match the stable cutout workflow: one pose, one edit request, one
+        # returned image. Avoid n=count because compatible gateways often
+        # reject it or turn the response into a contact sheet.
+        for index in range(count):
+            target = output_dir / f"{role}_{index}.png"
+            try:
+                await self.generate_action_frame(
+                    reference_paths,
+                    role,
+                    target,
+                    identity_reference=None,
+                    frame_index=index,
+                    frame_count=count,
+                    pose_consistency=keep_consistency,
                 )
-                for frame in frame_bytes:
-                    target = output_dir / f"{role}_{len(output_paths)}.png"
-                    target.write_bytes(frame)
-                    output_paths.append(target)
-                    if len(output_paths) >= count:
-                        break
-                if len(output_paths) >= count:
-                    break
+            except Exception as error:
+                errors.append(f"{role}_{index}: {error}")
+                continue
+            output_paths.append(target)
+
+        if not output_paths and errors:
+            raise ImageGenerationError("动作帧生成失败：" + "；".join(errors[-3:]))
         return output_paths
+
+    async def generate_action_frame(
+        self,
+        references: List[Path],
+        role: str,
+        output_path: Path,
+        identity_reference: Optional[Path] = None,
+        frame_index: int = 0,
+        frame_count: Optional[int] = None,
+        pose_consistency: Optional[bool] = None,
+    ) -> Path:
+        """Generate exactly one transparent action frame."""
+
+        if not self.available:
+            raise ImageGenerationError("AI 图像服务未配置，无法生成动作帧")
+
+        count = frame_count_for_role(role, frame_count)
+        index = max(0, min(count - 1, int(frame_index)))
+        pose = pose_plan_for(role, count)[index]
+        keep_consistency = (
+            getattr(self.settings, "pose_consistency", True)
+            if pose_consistency is None
+            else bool(pose_consistency)
+        )
+        transparent_background = self._transparent_background_support(
+            self.settings.ai_image_model
+        )
+        prompt = self._prompt_for(
+            role,
+            frame_count=count,
+            pose_consistency=keep_consistency,
+            transparent_background=transparent_background,
+            frame_index=index,
+            pose=pose,
+        )
+        reference_paths = self._reference_paths(references, identity_reference)
+        reference_paths = reference_paths[: self.settings.ai_max_references]
+        return await self._generate_single_image(prompt, reference_paths, output_path)
 
     async def remove_background(self, source: Path, output_path: Path) -> Path:
         """Ask the image model for one transparent cutout preview.
@@ -120,7 +150,17 @@ class OpenAICompatibleImageProvider:
             self.settings.ai_image_model
         )
         prompt = self._background_removal_prompt(transparent_background)
-        response = await self._request(prompt, [source], frame_count=1)
+        return await self._generate_single_image(prompt, [source], output_path)
+
+    async def _generate_single_image(
+        self,
+        prompt: str,
+        references: List[Path],
+        output_path: Path,
+    ) -> Path:
+        """Run one image edit and persist its first returned image."""
+
+        response = await self._request(prompt, references, frame_count=1)
         payload = response.json()
         if not isinstance(payload, dict):
             raise ImageGenerationError("图像服务返回了无法识别的数据格式")
@@ -135,7 +175,7 @@ class OpenAICompatibleImageProvider:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(image_bytes)
                     return output_path
-        raise ImageGenerationError("图像服务没有返回可预览的去背景图片")
+        raise ImageGenerationError("图像服务没有返回图片")
 
     @staticmethod
     def _reference_paths(references: List[Path], identity_reference: Optional[Path]) -> List[Path]:
@@ -171,16 +211,23 @@ class OpenAICompatibleImageProvider:
 
         transparent_support = cls._transparent_background_support(model)
         if transparent_support is False:
-            return [
+            candidates = [
                 dict(base_data, output_format="png"),
                 dict(base_data, n=1, output_format="png"),
                 dict(base_data, n=1),
             ]
-        return [
-            dict(base_data, background="transparent", output_format="png"),
-            dict(base_data, background="transparent"),
-            dict(base_data, n=1),
-        ]
+        else:
+            candidates = [
+                dict(base_data, background="transparent", output_format="png"),
+                dict(base_data, background="transparent"),
+                dict(base_data, n=1),
+            ]
+
+        unique: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            if candidate not in unique:
+                unique.append(candidate)
+        return unique
 
     async def _request(
         self,
@@ -243,21 +290,42 @@ class OpenAICompatibleImageProvider:
         frame_count: int = 8,
         pose_consistency: bool = True,
         transparent_background: Optional[bool] = None,
+        frame_index: Optional[int] = None,
+        pose: Optional[str] = None,
     ) -> str:
         action = ROLE_PROMPTS.get(role, ROLE_PROMPTS["idle"])
         count = frame_count_for_role(role, frame_count)
         plan = pose_plan_for(role, count)
-        sequence = "; ".join(
-            f"frame {index + 1}: {pose}"
-            for index, pose in enumerate(plan)
-        )
-        consistency = (
-            "Lock identity and proportions to the first identity reference before changing only the pose. "
-            "Keep the same face, markings, fur or feather pattern, ear shape, tail shape, camera angle, "
-            "lighting direction, crop, scale, and ground contact across every frame."
-            if pose_consistency
-            else "Keep the animal recognizable and full-body in every frame."
-        )
+        if frame_index is None:
+            sequence = "; ".join(
+                f"frame {index + 1}: {frame_pose}"
+                for index, frame_pose in enumerate(plan)
+            )
+            frame_request = (
+                f"Generate exactly {count} separate PNG frames, in order, not a contact sheet. "
+                f"The ordered pose plan is: {sequence}."
+            )
+            consistency = (
+                "Lock identity and proportions to the first identity reference before changing only the pose. "
+                "Keep the same face, markings, fur or feather pattern, ear shape, tail shape, camera angle, "
+                "lighting direction, crop, scale, and ground contact across every frame."
+                if pose_consistency
+                else "Keep the animal recognizable and full-body in every frame."
+            )
+        else:
+            selected_pose = pose or plan[frame_index % len(plan)]
+            frame_request = (
+                f"Generate exactly one separate PNG frame for animation frame {frame_index + 1} of {count}; "
+                "do not return a contact sheet or multiple variations. "
+                f"The target pose for this frame is: {selected_pose}."
+            )
+            consistency = (
+                "Lock identity and proportions to the first identity reference and change only the pose. "
+                "Keep the same face, markings, fur or feather pattern, ear shape, tail shape, camera angle, "
+                "lighting direction, crop, scale, and ground contact so this frame matches the other frames."
+                if pose_consistency
+                else "Keep the animal recognizable, full-body, and consistent with the reference images."
+            )
         background = (
             "Output settings: transparent background enabled. Prefer the image model's native "
             "transparent-background mode and return a PNG with a fully transparent background, "
@@ -281,8 +349,7 @@ class OpenAICompatibleImageProvider:
             "Keep the subject at the same pixel scale in every frame: the body occupies the same "
             "approximate area, the horizontal center stays fixed, and the feet stay on the same "
             "baseline near the lower edge. Do not zoom, pan, change the camera, or change lighting. "
-            f"The action is {action}. Generate exactly {count} separate PNG frames, in order, not a contact sheet. "
-            f"The ordered pose plan is: {sequence}. "
+            f"The action is {action}. {frame_request} "
             f"{background} Keep clean anti-aliased edges, no text, no frame, no room, no people, "
             "no watermark, no shadow, and no extra animals."
         )
