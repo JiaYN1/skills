@@ -32,8 +32,6 @@ class AISettingsUpdate(BaseModel):
     frame_count: Optional[int] = Field(default=None, ge=1, le=8)
     max_references: Optional[int] = Field(default=None, ge=1, le=4)
     timeout_seconds: Optional[int] = Field(default=None, ge=30, le=900)
-    remove_background: Optional[bool] = None
-    rembg_model: Optional[str] = None
     pose_consistency: Optional[bool] = None
     animation_mode: Optional[str] = None
     animation_fps: Optional[int] = Field(default=None, ge=1, le=60)

@@ -3,7 +3,7 @@
 服务端提供一个简单的浏览器页面和 API：
 
 1. 用户上传 1-8 张照片。
-2. 服务端先使用 rembg 模型做统一背景移除、alpha 边缘清理、主体缩放和落地基线处理，再调用 OpenAI-compatible 图像服务，为待机、走动、睡觉、点击反应生成动作帧；AI 输出随后经过同一套处理。
+2. 服务端把原图作为身份参考交给 OpenAI-compatible 图像服务，并在提示词中要求 AI 直接输出透明背景动作帧；服务端只做 PNG、alpha、主体缩放和落地基线校验，不再使用本地分割模型。
 3. 服务端生成资源包 zip。
 4. 如果勾选 exe，Windows Worker 从服务端领取资源包，在 Windows 上用 PyInstaller 打包并回传 exe。
 
@@ -22,7 +22,7 @@ docker compose up -d --build
 
 ## 前端配置 AI
 
-打开首页的“AI 配置（管理员）”面板，输入 `ADMIN_TOKEN` 后即可配置启用开关、API 地址、模型、API Key、基础动作帧数、走动/睡觉帧数、FPS、参考图数量、背景移除、姿态一致性和输出格式。Key 会保存在 `/data/settings.json`，不会返回原文；普通上传用户不需要管理令牌。
+打开首页的“AI 配置（管理员）”面板，输入 `ADMIN_TOKEN` 后即可配置启用开关、API 地址、模型、API Key、基础动作帧数、走动/睡觉帧数、FPS、参考图数量、姿态一致性和输出格式。Key 会保存在 `/data/settings.json`，不会返回原文；普通上传用户不需要管理令牌。
 
 首次部署必须在 `.env` 中设置 `ADMIN_TOKEN`，不要使用公开的默认值。
 
@@ -34,13 +34,11 @@ docker compose up -d --build
 AI_API_BASE_URL=https://api.openai.com/v1
 AI_API_KEY=...
 AI_IMAGE_MODEL=gpt-image-1
-REMOVE_BACKGROUND=true
 POSE_CONSISTENCY=true
 ANIMATION_MODE=hybrid
 ANIMATION_FPS=12
 WALK_FRAME_COUNT=12
 SLEEP_FRAME_COUNT=10
-REMBG_MODEL=isnet-general-use
 ```
 
 也可以把 `AI_API_BASE_URL` 指向内部网关或其他兼容服务。服务端会优先请求图片编辑接口 `/images/edits`，没有参考图时使用 `/images/generations`，并兼容 base64 与 URL 两种响应。
@@ -51,11 +49,11 @@ AI 生成会把用户图片发送到配置的图像服务；生产环境应补�
 
 `hybrid` 是默认格式：资源包同时包含透明逐帧 PNG、`animation.json` 和 `skeleton.json`。走动默认使用 12 个细分接触/下压/经过/抬升姿态，睡觉默认使用 10 个呼吸与轻微抽动姿态；每个动作可以在管理面板中设置 1-12 帧。`skeleton.json` 是 sprite-backed root rig：它保存 root、body、head、前后腿和尾巴的时间线，适合后续接入真正的部位分割/蒙皮引擎。
 
-服务器镜像已安装 `rembg[cpu]`。`REMOVE_BACKGROUND=true` 时会使用 `REMBG_MODEL` 指定的模型，默认 `isnet-general-use`，并启用 alpha matting、边缘去毛边和模型会话缓存。模型权重首次使用时下载到 `/data/rembg`；如果模型不可用，任务会明确失败，避免悄悄交付带背景的资源。
+背景移除由 AI 提示词强制执行。服务端不会安装或调用本地分割模型；AI 返回的动作帧如果没有透明 alpha 通道，任务会明确失败，避免悄悄交付带白底/绿底的资源。
 
 某些兼容图像网关会把请求的 8 帧返回成一张 4×2/2×4 contact sheet。服务端会在归一化图片前拆分这种返回，避免把整张拼图当成单帧；已生成的旧资源包需要重新生成。PNG 本身是逐帧资源，浏览器或图片查看器不会自动播放，动画预览请运行资源包中的 `pet_runtime.py`，或运行打包后的 exe。
 
-背景参数也会按模型自动选择：`gpt-image-1`/`gpt-image-1.5` 请求透明 PNG；`gpt-image-2` 不发送 `background=transparent`，使用纯色背景并在服务端 rembg 抠图。若使用自建兼容网关，未知模型会保留请求失败后的最小参数回退。
+提示词会明确要求 AI：只保留宠物主体，输出真实透明 alpha 通道，不要白底、绿底、棋盘格、房间、地面或阴影。`gpt-image-1`/`gpt-image-1.5` 仍会请求透明 PNG；`gpt-image-2` 不发送其不接受的 `background=transparent` 参数，但仍通过提示词要求透明 alpha。若模型无法遵守该要求，任务会失败，需要更换支持透明输出的图像模型或网关。
 
 动画默认使用走动 12 帧、睡觉 10 帧、12 FPS。服务端会把同一动作的所有帧统一到相同的透明画布、主体比例、水平中心和落地基线；AI 提示词也会锁定镜头、缩放、光线与脚底位置，减少逐帧漂移。Windows runtime 更新同一个 Tk 图片对象，不再删除/重建画布项，避免透明窗口闪烁。
 

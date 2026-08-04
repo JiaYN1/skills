@@ -26,6 +26,8 @@ class ImageProviderModelTests(unittest.TestCase):
 
         self.assertIn("does not support transparent output", prompt)
         self.assertNotIn("fully transparent background", prompt)
+        self.assertIn("actual transparent alpha channel", prompt)
+        self.assertIn("server will not remove", prompt)
 
     def test_gpt_image_2_request_never_sends_transparent_background(self):
         attempts = OpenAICompatibleImageProvider._request_attempts(

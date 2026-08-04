@@ -39,8 +39,6 @@ class Settings:
     ai_timeout_seconds: int
     ai_frame_count: int
     ai_max_references: int
-    remove_background: bool
-    rembg_model: str
     build_mode: str
     worker_token: str
     admin_token: str
@@ -73,8 +71,6 @@ class Settings:
             ai_timeout_seconds=max(30, _env_int("AI_TIMEOUT_SECONDS", 180)),
             ai_frame_count=max(1, min(8, _env_int("AI_FRAME_COUNT", 4))),
             ai_max_references=max(1, min(4, _env_int("AI_MAX_REFERENCES", 2))),
-            remove_background=_env_bool("REMOVE_BACKGROUND", True),
-            rembg_model=os.getenv("REMBG_MODEL", "isnet-general-use").strip() or "isnet-general-use",
             build_mode=build_mode,
             worker_token=os.getenv("WORKER_TOKEN", "").strip(),
             admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
@@ -118,10 +114,6 @@ class Settings:
             self.ai_frame_count = max(1, min(8, values["ai_frame_count"]))
         if isinstance(values.get("ai_max_references"), int):
             self.ai_max_references = max(1, min(4, values["ai_max_references"]))
-        if isinstance(values.get("remove_background"), bool):
-            self.remove_background = values["remove_background"]
-        if isinstance(values.get("rembg_model"), str) and values["rembg_model"].strip():
-            self.rembg_model = values["rembg_model"].strip()
         if isinstance(values.get("pose_consistency"), bool):
             self.pose_consistency = values["pose_consistency"]
         if isinstance(values.get("animation_mode"), str):
@@ -142,8 +134,6 @@ class Settings:
             "ai_timeout_seconds": self.ai_timeout_seconds,
             "ai_frame_count": self.ai_frame_count,
             "ai_max_references": self.ai_max_references,
-            "remove_background": self.remove_background,
-            "rembg_model": self.rembg_model,
             "pose_consistency": self.pose_consistency,
             "animation_mode": self.animation_mode,
             "animation_fps": self.animation_fps,
@@ -199,13 +189,6 @@ class Settings:
             self.ai_max_references = max(1, min(4, int(values["max_references"])))
         if values.get("timeout_seconds") is not None:
             self.ai_timeout_seconds = max(30, min(900, int(values["timeout_seconds"])))
-        if values.get("remove_background") is not None:
-            self.remove_background = bool(values["remove_background"])
-        if values.get("rembg_model") is not None:
-            model = str(values["rembg_model"]).strip()
-            if not model or len(model) > 120:
-                raise ValueError("rembg 模型名称无效")
-            self.rembg_model = model
         if values.get("pose_consistency") is not None:
             self.pose_consistency = bool(values["pose_consistency"])
         if values.get("animation_mode") is not None:
@@ -233,8 +216,6 @@ class Settings:
             "timeout_seconds": self.ai_timeout_seconds,
             "frame_count": self.ai_frame_count,
             "max_references": self.ai_max_references,
-            "remove_background": self.remove_background,
-            "rembg_model": self.rembg_model,
             "pose_consistency": self.pose_consistency,
             "animation_mode": self.animation_mode,
             "animation_fps": self.animation_fps,

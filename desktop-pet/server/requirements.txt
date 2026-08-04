@@ -3,6 +3,3 @@ httpx>=0.27,<1
 Pillow>=10,<13
 python-multipart>=0.0.9,<1
 uvicorn[standard]>=0.30,<1
-# Server-side model-based background removal. The model weights are downloaded
-# by rembg on first use and should be cached in the deployment environment.
-rembg[cpu]>=2.0,<3

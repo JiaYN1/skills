@@ -37,8 +37,6 @@ function fillAiSettings(values) {
   document.querySelector("#ai-animation-fps").value = values.animation_fps || 12;
   document.querySelector("#ai-animation-mode").value = values.animation_mode || "hybrid";
   document.querySelector("#ai-pose-consistency").checked = values.pose_consistency !== false;
-  document.querySelector("#ai-remove-background").checked = Boolean(values.remove_background);
-  document.querySelector("#ai-rembg-model").value = values.rembg_model || "isnet-general-use";
   document.querySelector("#ai-key").value = "";
   document.querySelector("#ai-key").placeholder = values.configured
     ? `已配置（${values.api_key_mask}），留空表示不修改`
@@ -75,8 +73,6 @@ aiSettingsForm.addEventListener("submit", async (event) => {
       animation_fps: Number(document.querySelector("#ai-animation-fps").value),
       animation_mode: document.querySelector("#ai-animation-mode").value,
       pose_consistency: document.querySelector("#ai-pose-consistency").checked,
-      remove_background: document.querySelector("#ai-remove-background").checked,
-      rembg_model: document.querySelector("#ai-rembg-model").value.trim(),
       clear_api_key: document.querySelector("#ai-clear-key").checked,
     };
     if (key) body.api_key = key;

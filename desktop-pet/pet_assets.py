@@ -1,32 +1,14 @@
 """Photo normalization for generated desktop pet packages.
 
 The pipeline intentionally has a lightweight fallback so the MVP works with
-plain Pillow. Installing ``rembg`` enables model-based background removal.
+plain Pillow. The server asks the image model for transparent PNG output and
+only uses Pillow here for alpha cleanup, cropping, and frame alignment.
 """
 
 from collections import deque
-from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
-
-
-DEFAULT_REMBG_MODEL = "isnet-general-use"
-
-
-@lru_cache(maxsize=4)
-def _rembg_session(model: str):
-    """Load and cache one rembg model session per process.
-
-    Loading a segmentation model is expensive and the server normally handles
-    several frames in one job. Keeping the session here avoids reloading the
-    model once for every frame while still allowing an operator to choose a
-    different model through the server configuration.
-    """
-
-    from rembg import new_session  # type: ignore
-
-    return new_session(model)
 
 
 def _clean_alpha_edges(image, minimum_alpha: int = 8):
@@ -115,52 +97,11 @@ def _remove_simple_background(image, tolerance: int = 28):
 
 def _remove_background(
     image,
-    use_rembg: bool = False,
     background_mode: Optional[str] = None,
-    rembg_model: Optional[str] = None,
 ):
-    from PIL import Image
-
-    mode = str(background_mode or ("rembg" if use_rembg else "simple")).strip().lower()
+    mode = str(background_mode or "simple").strip().lower()
     if mode == "none":
         return _clean_alpha_edges(image)
-
-    if mode in {"auto", "rembg"} or use_rembg:
-        try:
-            from rembg import remove  # type: ignore
-
-            source = BytesIO()
-            image.convert("RGBA").save(source, format="PNG")
-            model = str(rembg_model or DEFAULT_REMBG_MODEL).strip() or DEFAULT_REMBG_MODEL
-            session = _rembg_session(model)
-            options = {
-                "session": session,
-                "alpha_matting": True,
-                "alpha_matting_foreground_threshold": 240,
-                "alpha_matting_background_threshold": 10,
-                "alpha_matting_erode_size": 10,
-                "post_process_mask": True,
-            }
-            try:
-                result = remove(source.getvalue(), **options)
-            except TypeError:
-                # Older rembg versions do not expose every alpha-matting
-                # option. Keep the model path working across server images.
-                result = remove(
-                    source.getvalue(),
-                    session=session,
-                    alpha_matting=True,
-                )
-            with Image.open(BytesIO(result)) as output:
-                return _clean_alpha_edges(output.convert("RGBA"))
-        except Exception as error:
-            if mode == "rembg":
-                raise RuntimeError(
-                    "服务端 rembg 抠图模型不可用，请检查 rembg 安装、REMBG_MODEL 和模型权重下载"
-                ) from error
-            # ``auto`` remains useful for local previews and development
-            # environments where model weights are intentionally omitted.
-            pass
 
     return _clean_alpha_edges(_remove_simple_background(image))
 
@@ -390,39 +331,36 @@ def normalize_pet_image(
     source_path: Path,
     destination_path: Path,
     canvas_size: int = 320,
-    use_rembg: bool = False,
     background_mode: Optional[str] = None,
     anchor: str = "center",
     subject_scale: float = 1.0,
-    rembg_model: Optional[str] = None,
+    require_transparency: bool = False,
 ) -> None:
     """Normalize one user photo to a transparent, pose-aligned square PNG.
 
     ``anchor="bottom"`` keeps the subject's baseline stable across walking
     frames.  A center anchor remains the default for backwards compatibility
     and works better for curled sleeping poses.  ``background_mode`` accepts
-    ``none``, ``simple``, ``rembg`` or ``auto``. ``auto`` gracefully falls
-    back to the lightweight border flood-fill; strict ``rembg`` mode raises a
-    clear error when the server model is unavailable.
+    ``none`` or a Pillow-only simple-color fallback. When
+    ``require_transparency`` is true, an opaque AI response is rejected instead
+    of being packaged with an accidental white/green background.
     """
 
     normalize_pet_sequence(
         [source_path],
         [destination_path],
         canvas_size=canvas_size,
-        use_rembg=use_rembg,
         background_mode=background_mode,
         anchor=anchor,
         subject_scale=subject_scale,
-        rembg_model=rembg_model,
+        require_transparency=require_transparency,
     )
 
 
 def _prepare_subject(
     source_path: Path,
-    use_rembg: bool,
     background_mode: Optional[str],
-    rembg_model: Optional[str],
+    require_transparency: bool,
 ):
     """Read, orient, segment, and crop one source without resizing it."""
 
@@ -433,10 +371,12 @@ def _prepare_subject(
 
     image = _remove_background(
         image,
-        use_rembg=use_rembg,
         background_mode=background_mode,
-        rembg_model=rembg_model,
     )
+    if require_transparency and image.getchannel("A").getextrema() == (255, 255):
+        raise ValueError(
+            f"AI 返回的动作帧没有透明 alpha 通道，请在图像模型提示词中启用透明背景: {source_path.name}"
+        )
     bbox = image.getchannel("A").getbbox()
     if not bbox:
         raise ValueError(f"无法从照片中读取有效主体: {source_path}")
@@ -447,11 +387,10 @@ def normalize_pet_sequence(
     source_paths: Sequence[Path],
     destination_paths: Sequence[Path],
     canvas_size: int = 320,
-    use_rembg: bool = False,
     background_mode: Optional[str] = None,
     anchor: str = "center",
     subject_scale: float = 1.0,
-    rembg_model: Optional[str] = None,
+    require_transparency: bool = False,
 ) -> None:
     """Normalize a complete action sequence with one shared render contract.
 
@@ -469,7 +408,7 @@ def normalize_pet_sequence(
         return
 
     prepared = [
-        _prepare_subject(path, use_rembg, background_mode, rembg_model)
+        _prepare_subject(path, background_mode, require_transparency)
         for path in source_paths
     ]
     padding = max(4, int(canvas_size * 0.08))

@@ -40,7 +40,7 @@ def create_package(
     photo_paths: List[Path],
     pet_name: str,
     output_parent: Path,
-    use_rembg: bool,
+    use_simple_background: bool,
     animation_mode: str = "hybrid",
 ) -> Path:
     """Create a self-contained, previewable pet package."""
@@ -61,8 +61,7 @@ def create_package(
                 source_path,
                 destination,
                 canvas_size=320,
-                use_rembg=use_rembg,
-                background_mode="auto" if use_rembg else "simple",
+                background_mode="simple" if use_simple_background else "none",
                 anchor="center" if role == "sleep" else "bottom",
                 subject_scale=0.96,
             )
@@ -178,7 +177,7 @@ class CreatorApp(tk.Tk):
         self.photo_paths: List[Path] = []
         self.name_var = tk.StringVar(value="我的宠物")
         self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
-        self.use_rembg_var = tk.BooleanVar(value=False)
+        self.use_simple_background_var = tk.BooleanVar(value=False)
         self.animation_mode_var = tk.StringVar(value="hybrid")
         self.status_var = tk.StringVar(value="请选择 1-8 张照片。第一张作为待机动作。")
         self.last_package_dir: Optional[Path] = None
@@ -233,8 +232,8 @@ class CreatorApp(tk.Tk):
         options.pack(fill="x", pady=(12, 0))
         ttk.Checkbutton(
             options,
-            text="尝试自动抠图（需要额外安装 rembg，失败时自动使用轻量抠图）",
-            variable=self.use_rembg_var,
+            text="尝试移除简单纯色背景（仅使用 Pillow）",
+            variable=self.use_simple_background_var,
         ).pack(anchor="w")
         animation_options = ttk.Frame(options)
         animation_options.pack(fill="x", pady=(10, 0))
@@ -331,15 +330,21 @@ class CreatorApp(tk.Tk):
             list(self.photo_paths),
             self.name_var.get().strip(),
             Path(self.output_var.get()).expanduser(),
-            self.use_rembg_var.get(),
+            self.use_simple_background_var.get(),
             self.animation_mode_var.get(),
         )
         threading.Thread(target=self._generate_worker, args=(arguments,), daemon=True).start()
 
     def _generate_worker(self, arguments):
-        photos, name, output, use_rembg, animation_mode = arguments
+        photos, name, output, use_simple_background, animation_mode = arguments
         try:
-            package_dir = create_package(photos, name, output, use_rembg, animation_mode)
+            package_dir = create_package(
+                photos,
+                name,
+                output,
+                use_simple_background,
+                animation_mode,
+            )
             self.after(0, lambda: self._generation_done(package_dir))
         except Exception as error:
             self.after(0, lambda: self._generation_failed(error))

@@ -228,18 +228,22 @@ class OpenAICompatibleImageProvider:
         )
         if transparent_background is True:
             background = (
-                "Use a fully transparent background or a perfectly flat removable green background "
-                "if the service cannot return alpha."
+                "Background removal is mandatory. Isolate only the pet from every input image and "
+                "return a PNG with a fully transparent background and a clean alpha channel. "
+                "Do not draw white, green, checkerboard, room, floor, or cast-shadow pixels behind it."
             )
         elif transparent_background is False:
             background = (
-                "Use a perfectly flat white or green background with no shadows; the server will remove "
-                "this background after generation because this model does not support transparent output."
+                "This model does not support transparent output parameters. Background removal is still "
+                "mandatory: isolate only the pet and return a PNG with an actual transparent alpha "
+                "channel. Do not draw white, green, checkerboard, room, floor, or shadow pixels; "
+                "the server will not remove the background afterward."
             )
         else:
             background = (
-                "Use a fully transparent background when supported; otherwise use a perfectly flat "
-                "white or green background that can be removed after generation."
+                "Background removal is mandatory. Return a PNG with a fully transparent background "
+                "and a clean alpha channel; do not draw a white, green, checkerboard, room, floor, "
+                "or cast-shadow background."
             )
         return (
             "Use case: identity-preserve. Asset type: a frame-by-frame 2D desktop-pet animation. "

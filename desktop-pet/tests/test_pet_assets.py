@@ -61,6 +61,22 @@ class PetAssetTests(unittest.TestCase):
                     self.assertEqual(frame.mode, "RGBA")
                     self.assertEqual(frame.getpixel((0, 0)), (0, 0, 0, 0))
 
+    def test_normalize_sequence_rejects_opaque_ai_frame(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "opaque-ai-frame.png"
+            destination = root / "assets" / "frame.png"
+            Image.new("RGB", (80, 80), (255, 255, 255)).save(source)
+
+            with self.assertRaisesRegex(ValueError, "没有透明 alpha 通道"):
+                normalize_pet_sequence(
+                    [source],
+                    [destination],
+                    canvas_size=64,
+                    background_mode="none",
+                    require_transparency=True,
+                )
+
     def test_split_contact_sheet_returns_individual_frames(self):
         from PIL import ImageDraw
 

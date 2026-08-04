@@ -53,11 +53,9 @@ async def build_pet_package(
             source,
             target,
             canvas_size=512,
-            use_rembg=settings.remove_background,
-            background_mode="rembg" if settings.remove_background else "none",
+            background_mode="none",
             anchor="center",
             subject_scale=0.96,
-            rembg_model=getattr(settings, "rembg_model", None),
         )
         normalized_inputs.append(target)
 
@@ -92,11 +90,10 @@ async def build_pet_package(
             selected_sources,
             destinations,
             canvas_size=320,
-            use_rembg=settings.remove_background,
-            background_mode="rembg" if settings.remove_background else "none",
+            background_mode="none",
             anchor=ROLE_ANCHORS.get(role, "center"),
             subject_scale=0.96,
-            rembg_model=getattr(settings, "rembg_model", None),
+            require_transparency=bool(generated),
         )
         config_assets[role] = [
             f"assets/{destination.name}" for destination in destinations
@@ -124,7 +121,7 @@ async def build_pet_package(
             "ai_frame_count": ai_frame_total,
             "ai_error_count": ai_error_count,
             "frame_counts": {role: len(config_assets.get(role, [])) for role in ROLES},
-            "background_removal": bool(settings.remove_background),
+            "background_removal": "ai-prompt",
             "pose_consistency": bool(getattr(settings, "pose_consistency", True)),
         },
     }
