@@ -17,11 +17,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
 ANIMATION_ROLES = ("idle", "walk", "sleep", "react")
-DEFAULT_ANIMATION_FPS = 10
+DEFAULT_ANIMATION_FPS = 12
 DEFAULT_FRAME_COUNTS = {
     "idle": 8,
-    "walk": 8,
-    "sleep": 8,
+    "walk": 12,
+    "sleep": 10,
     "react": 6,
 }
 ANIMATION_MODES = ("png", "skeleton", "hybrid")
@@ -40,12 +40,16 @@ _POSE_PLANS = {
     ),
     "walk": (
         "left front and right rear legs extended, contact pose",
+        "left contact pose beginning to lift, body moving forward slightly",
         "body lowered, legs absorbing the step",
         "left legs passing under the body, right legs moving forward",
+        "left legs passing forward, body centered over the feet",
         "body raised, opposite diagonal contact pose",
         "right front and left rear legs extended, contact pose",
+        "right contact pose beginning to lift, body moving forward slightly",
         "body lowered, legs absorbing the step",
         "right legs passing under the body, left legs moving forward",
+        "right legs passing forward, body centered over the feet",
         "body raised, opposite diagonal contact pose",
     ),
     "sleep": (
@@ -57,6 +61,8 @@ _POSE_PLANS = {
         "gentle breathing in while curled asleep",
         "gentle breathing peak while curled asleep",
         "gentle breathing out while curled asleep",
+        "returning to curled neutral while asleep",
+        "tiny sleepy ear or whisker twitch, still curled asleep",
     ),
     "react": (
         "neutral reaction anticipation",

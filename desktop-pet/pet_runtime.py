@@ -89,10 +89,15 @@ class PetWindow:
         self.base_dir = base_dir
         self.animation_mode = str(config.animation.get("mode") or "hybrid").lower()
         try:
-            self.animation_fps = max(1.0, min(60.0, float(config.animation.get("fps", 10))))
+            self.animation_fps = max(1.0, min(60.0, float(config.animation.get("fps", 12))))
         except (TypeError, ValueError):
-            self.animation_fps = 10.0
+            self.animation_fps = 12.0
         self.frame_interval = 1.0 / self.animation_fps
+        # Poll at least twice per frame so a high-FPS configuration does not
+        # skip frames. The image item itself is updated in place below; this is
+        # important because deleting/recreating a Tk canvas item causes a
+        # visible flash on transparent windows.
+        self.tick_ms = max(8, min(50, round(500.0 / self.animation_fps)))
         self.next_frame_at = 0.0
         self.root = tk.Tk()
         self.root.title(config.name)
@@ -132,6 +137,7 @@ class PetWindow:
         self.drag_start: Optional[Tuple[int, int, int, int]] = None
         self.dragged = False
         self.photo_image = None
+        self.image_item = None
 
         self._build_menu()
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -149,6 +155,14 @@ class PetWindow:
         self.x = max(0, (screen_width - width) // 2)
         self.y = max(0, screen_height - height - 100)
         self._set_geometry(width, height)
+        self.photo_image = first_frame
+        self.image_item = self.canvas.create_image(
+            0,
+            0,
+            anchor="nw",
+            image=first_frame,
+            tags="pet",
+        )
 
     def _resolve_asset(self, relative_path: str) -> Path:
         path = Path(relative_path)
@@ -296,7 +310,7 @@ class PetWindow:
     def _frame_count(self, role: str, source_count: int) -> int:
         if source_count > 1:
             return source_count
-        defaults = {"idle": 8, "walk": 8, "sleep": 8, "react": 6}
+        defaults = {"idle": 8, "walk": 12, "sleep": 10, "react": 6}
         sequences = self.config.animation.get("sequences", {})
         sequence = sequences.get(role, {}) if isinstance(sequences, dict) else {}
         if isinstance(sequence, dict):
@@ -410,9 +424,17 @@ class PetWindow:
         self._move()
         role_frames = self.frames[self.state]
         frame = role_frames[self.frame_index % len(role_frames)]
-        self.canvas.delete("pet")
-        self.canvas.create_image(0, 0, anchor="nw", image=frame, tags="pet")
         self.photo_image = frame
+        if self.image_item is None:
+            self.image_item = self.canvas.create_image(
+                0,
+                0,
+                anchor="nw",
+                image=frame,
+                tags="pet",
+            )
+        else:
+            self.canvas.itemconfig(self.image_item, image=frame)
         if self.next_frame_at <= 0.0:
             self.next_frame_at = now + self.frame_interval
         elif now >= self.next_frame_at:
@@ -420,7 +442,7 @@ class PetWindow:
             steps = 1 + int(elapsed / self.frame_interval)
             self.frame_index += steps
             self.next_frame_at += steps * self.frame_interval
-        self.root.after(self.TICK_MS, self._tick)
+        self.root.after(self.tick_ms, self._tick)
 
     def close(self):
         try:

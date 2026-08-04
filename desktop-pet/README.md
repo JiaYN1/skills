@@ -13,9 +13,9 @@ Windows Worker 和 Windows + AI 交接步骤见 [WINDOWS_WORKER_HANDOFF.md](WIND
 - 待机呼吸、左右走动、自动睡觉、点击弹跳反应。
 - 右键菜单：立即睡觉、恢复活动、退出。
 - 支持一张照片起步，也支持多张照片作为动作/备用帧。
-- 可选 `rembg` 模型抠图；没有安装时使用轻量的纯色背景抠除兜底。
+- 服务端使用 `rembg` 模型抠图，并对 alpha 边缘做去毛边处理；本地预览仍保留轻量兜底。
 - 统一的身份参考图、透明化、落地基线和主体比例处理，减少不同动作帧漂移。
-- 服务端可按动作生成 8-12 张有序走动/睡觉 PNG，并导出 `animation.json` 与可选 `skeleton.json`。
+- 服务端可按动作生成 10-12 张有序走动/睡觉 PNG，并导出 `animation.json` 与可选 `skeleton.json`。
 - Windows 上通过 PyInstaller 生成包含资源的单文件 exe。
 
 ## Windows 上运行
@@ -66,9 +66,9 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 服务端页面的“AI 配置（管理员）”支持：
 
-- 对输入照片和 AI 输出调用 `rembg`（未安装时自动使用轻量边缘背景兜底）。
+- 对输入照片和 AI 输出调用服务端 `rembg` 分割模型；默认使用 `isnet-general-use`，并启用 alpha matting 和透明边缘清理。
 - 把第一张照片作为身份锚点，把其余照片作为动作参考，并在提示词中锁定毛色、脸部、比例、镜头、主体缩放和落地基线。
-- 独立设置走动/睡觉帧数（最多 12）、播放 FPS 和动作输出格式。
+- 独立设置走动/睡觉帧数（默认 12/10，最多 12）、播放 FPS 和动作输出格式。
 
 默认 `hybrid` 模式会同时包含：
 
@@ -80,7 +80,7 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 部分 OpenAI-compatible 网关会忽略 `n=8` 的逐张返回约定，把 8 帧合成一张 4×2 或 2×4 的 contact sheet。服务端会在资源归一化前识别并拆成独立 PNG；因此旧任务中已经生成的“大图”不会自动修复，需要重新生成资源包。直接打开 PNG 或 ZIP 也只是静态资源，动画预览应运行 `pet_runtime.py` 或最终 exe。
 
-背景参数会按图像模型自动选择：`gpt-image-1`/`gpt-image-1.5` 可以请求透明 PNG；`gpt-image-2` 不发送 `background=transparent`，改用纯色背景后由服务端抠图。这样可以避免 gpt-image-2 的透明背景参数错误。
+背景参数会按图像模型自动选择：`gpt-image-1`/`gpt-image-1.5` 可以请求透明 PNG；`gpt-image-2` 不发送 `background=transparent`，改用纯色背景后由服务端 `rembg` 抠图。这样可以避免 gpt-image-2 的透明背景参数错误。
 
 常用环境变量：
 
@@ -88,9 +88,10 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 REMOVE_BACKGROUND=true
 POSE_CONSISTENCY=true
 ANIMATION_MODE=hybrid
-ANIMATION_FPS=10
-WALK_FRAME_COUNT=8
-SLEEP_FRAME_COUNT=8
+ANIMATION_FPS=12
+WALK_FRAME_COUNT=12
+SLEEP_FRAME_COUNT=10
+REMBG_MODEL=isnet-general-use
 ```
 
 ## 后续产品化方向

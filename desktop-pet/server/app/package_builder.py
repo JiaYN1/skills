@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pet_assets import normalize_pet_image
+from pet_assets import normalize_pet_image, normalize_pet_sequence
 from pet_animation import write_animation_bundle
 from pet_common import ROLES, assign_roles, safe_filename
 
@@ -54,9 +54,10 @@ async def build_pet_package(
             target,
             canvas_size=512,
             use_rembg=settings.remove_background,
-            background_mode="auto" if settings.remove_background else "simple",
+            background_mode="rembg" if settings.remove_background else "none",
             anchor="center",
             subject_scale=0.96,
+            rembg_model=getattr(settings, "rembg_model", None),
         )
         normalized_inputs.append(target)
 
@@ -85,20 +86,21 @@ async def build_pet_package(
 
         sources = generated or role_inputs[role] or [normalized_inputs[0]]
         ai_frame_total += len(generated)
-        config_assets[role] = []
-        for frame_index, source in enumerate(sources[: role_frame_count]):
-            filename = f"{role}_{frame_index}.png"
-            destination = assets_dir / filename
-            normalize_pet_image(
-                source,
-                destination,
-                canvas_size=320,
-                use_rembg=settings.remove_background,
-                background_mode="auto" if settings.remove_background else "simple",
-                anchor=ROLE_ANCHORS.get(role, "center"),
-                subject_scale=0.96,
-            )
-            config_assets[role].append(f"assets/{filename}")
+        selected_sources = sources[: role_frame_count]
+        destinations = [assets_dir / f"{role}_{index}.png" for index in range(len(selected_sources))]
+        normalize_pet_sequence(
+            selected_sources,
+            destinations,
+            canvas_size=320,
+            use_rembg=settings.remove_background,
+            background_mode="rembg" if settings.remove_background else "none",
+            anchor=ROLE_ANCHORS.get(role, "center"),
+            subject_scale=0.96,
+            rembg_model=getattr(settings, "rembg_model", None),
+        )
+        config_assets[role] = [
+            f"assets/{destination.name}" for destination in destinations
+        ]
 
     animation_mode = getattr(settings, "animation_mode", "hybrid")
     animation_fps = getattr(settings, "animation_fps", 10)

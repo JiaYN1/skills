@@ -3,7 +3,7 @@
 服务端提供一个简单的浏览器页面和 API：
 
 1. 用户上传 1-8 张照片。
-2. 服务端先做统一的背景移除、主体缩放和落地基线处理，再调用 OpenAI-compatible 图像服务，为待机、走动、睡觉、点击反应生成透明动作帧。
+2. 服务端先使用 rembg 模型做统一背景移除、alpha 边缘清理、主体缩放和落地基线处理，再调用 OpenAI-compatible 图像服务，为待机、走动、睡觉、点击反应生成动作帧；AI 输出随后经过同一套处理。
 3. 服务端生成资源包 zip。
 4. 如果勾选 exe，Windows Worker 从服务端领取资源包，在 Windows 上用 PyInstaller 打包并回传 exe。
 
@@ -37,9 +37,10 @@ AI_IMAGE_MODEL=gpt-image-1
 REMOVE_BACKGROUND=true
 POSE_CONSISTENCY=true
 ANIMATION_MODE=hybrid
-ANIMATION_FPS=10
-WALK_FRAME_COUNT=8
-SLEEP_FRAME_COUNT=8
+ANIMATION_FPS=12
+WALK_FRAME_COUNT=12
+SLEEP_FRAME_COUNT=10
+REMBG_MODEL=isnet-general-use
 ```
 
 也可以把 `AI_API_BASE_URL` 指向内部网关或其他兼容服务。服务端会优先请求图片编辑接口 `/images/edits`，没有参考图时使用 `/images/generations`，并兼容 base64 与 URL 两种响应。
@@ -48,13 +49,15 @@ AI 生成会把用户图片发送到配置的图像服务；生产环境应补�
 
 ## 动画输出
 
-`hybrid` 是默认格式：资源包同时包含透明逐帧 PNG、`animation.json` 和 `skeleton.json`。走动默认使用 8 个接触/下压/经过/抬升的循环姿态，睡觉默认使用 8 个呼吸与轻微抽动姿态；每个动作可以在管理面板中设置 1-12 帧。`skeleton.json` 是 sprite-backed root rig：它保存 root、body、head、前后腿和尾巴的时间线，适合后续接入真正的部位分割/蒙皮引擎。
+`hybrid` 是默认格式：资源包同时包含透明逐帧 PNG、`animation.json` 和 `skeleton.json`。走动默认使用 12 个细分接触/下压/经过/抬升姿态，睡觉默认使用 10 个呼吸与轻微抽动姿态；每个动作可以在管理面板中设置 1-12 帧。`skeleton.json` 是 sprite-backed root rig：它保存 root、body、head、前后腿和尾巴的时间线，适合后续接入真正的部位分割/蒙皮引擎。
 
-如果服务器安装了 `rembg`，`REMOVE_BACKGROUND=true` 时会优先使用模型抠图；没有安装时会回退到简单背景连通区域移除，不会阻塞任务。
+服务器镜像已安装 `rembg[cpu]`。`REMOVE_BACKGROUND=true` 时会使用 `REMBG_MODEL` 指定的模型，默认 `isnet-general-use`，并启用 alpha matting、边缘去毛边和模型会话缓存。模型权重首次使用时下载到 `/data/rembg`；如果模型不可用，任务会明确失败，避免悄悄交付带背景的资源。
 
 某些兼容图像网关会把请求的 8 帧返回成一张 4×2/2×4 contact sheet。服务端会在归一化图片前拆分这种返回，避免把整张拼图当成单帧；已生成的旧资源包需要重新生成。PNG 本身是逐帧资源，浏览器或图片查看器不会自动播放，动画预览请运行资源包中的 `pet_runtime.py`，或运行打包后的 exe。
 
-背景参数也会按模型自动选择：`gpt-image-1`/`gpt-image-1.5` 请求透明 PNG；`gpt-image-2` 不发送 `background=transparent`，使用纯色背景并在服务端抠图。若使用自建兼容网关，未知模型会保留请求失败后的最小参数回退。
+背景参数也会按模型自动选择：`gpt-image-1`/`gpt-image-1.5` 请求透明 PNG；`gpt-image-2` 不发送 `background=transparent`，使用纯色背景并在服务端 rembg 抠图。若使用自建兼容网关，未知模型会保留请求失败后的最小参数回退。
+
+动画默认使用走动 12 帧、睡觉 10 帧、12 FPS。服务端会把同一动作的所有帧统一到相同的透明画布、主体比例、水平中心和落地基线；AI 提示词也会锁定镜头、缩放、光线与脚底位置，减少逐帧漂移。Windows runtime 更新同一个 Tk 图片对象，不再删除/重建画布项，避免透明窗口闪烁。
 
 ## Windows Worker
 

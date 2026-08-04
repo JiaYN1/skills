@@ -8,7 +8,7 @@ try:
 except ImportError:
     Image = None
 
-from pet_assets import normalize_pet_image, split_contact_sheet_bytes
+from pet_assets import normalize_pet_image, normalize_pet_sequence, split_contact_sheet_bytes
 
 
 @unittest.skipIf(Image is None, "Pillow 未安装")
@@ -31,6 +31,35 @@ class PetAssetTests(unittest.TestCase):
                 self.assertEqual(normalized.mode, "RGBA")
                 self.assertEqual(normalized.getpixel((0, 0))[3], 0)
                 self.assertGreater(normalized.getbbox()[2], 60)
+
+    def test_normalize_sequence_uses_one_canvas_and_cleans_transparent_rgb(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources = []
+            destinations = []
+            for index in range(2):
+                source = root / f"source-{index}.png"
+                image = Image.new("RGBA", (160, 100), (255, 255, 255, 255))
+                for x in range(40 + index * 4, 120 + index * 4):
+                    for y in range(15, 85):
+                        image.putpixel((x, y), (200, 80, 60, 255))
+                image.save(source)
+                sources.append(source)
+                destinations.append(root / "assets" / f"frame-{index}.png")
+
+            normalize_pet_sequence(
+                sources,
+                destinations,
+                canvas_size=128,
+                background_mode="simple",
+                anchor="bottom",
+            )
+
+            for destination in destinations:
+                with Image.open(destination) as frame:
+                    self.assertEqual(frame.size, (128, 128))
+                    self.assertEqual(frame.mode, "RGBA")
+                    self.assertEqual(frame.getpixel((0, 0)), (0, 0, 0, 0))
 
     def test_split_contact_sheet_returns_individual_frames(self):
         from PIL import ImageDraw

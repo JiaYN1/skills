@@ -32,12 +32,13 @@ function fillAiSettings(values) {
   document.querySelector("#ai-frame-count").value = values.frame_count || 4;
   document.querySelector("#ai-max-references").value = values.max_references || 2;
   document.querySelector("#ai-timeout").value = values.timeout_seconds || 180;
-  document.querySelector("#ai-walk-frame-count").value = values.walk_frame_count || 8;
-  document.querySelector("#ai-sleep-frame-count").value = values.sleep_frame_count || 8;
-  document.querySelector("#ai-animation-fps").value = values.animation_fps || 10;
+  document.querySelector("#ai-walk-frame-count").value = values.walk_frame_count || 12;
+  document.querySelector("#ai-sleep-frame-count").value = values.sleep_frame_count || 10;
+  document.querySelector("#ai-animation-fps").value = values.animation_fps || 12;
   document.querySelector("#ai-animation-mode").value = values.animation_mode || "hybrid";
   document.querySelector("#ai-pose-consistency").checked = values.pose_consistency !== false;
   document.querySelector("#ai-remove-background").checked = Boolean(values.remove_background);
+  document.querySelector("#ai-rembg-model").value = values.rembg_model || "isnet-general-use";
   document.querySelector("#ai-key").value = "";
   document.querySelector("#ai-key").placeholder = values.configured
     ? `已配置（${values.api_key_mask}），留空表示不修改`
@@ -75,6 +76,7 @@ aiSettingsForm.addEventListener("submit", async (event) => {
       animation_mode: document.querySelector("#ai-animation-mode").value,
       pose_consistency: document.querySelector("#ai-pose-consistency").checked,
       remove_background: document.querySelector("#ai-remove-background").checked,
+      rembg_model: document.querySelector("#ai-rembg-model").value.trim(),
       clear_api_key: document.querySelector("#ai-clear-key").checked,
     };
     if (key) body.api_key = key;

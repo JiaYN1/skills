@@ -5,9 +5,51 @@ plain Pillow. Installing ``rembg`` enables model-based background removal.
 """
 
 from collections import deque
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
+
+
+DEFAULT_REMBG_MODEL = "isnet-general-use"
+
+
+@lru_cache(maxsize=4)
+def _rembg_session(model: str):
+    """Load and cache one rembg model session per process.
+
+    Loading a segmentation model is expensive and the server normally handles
+    several frames in one job. Keeping the session here avoids reloading the
+    model once for every frame while still allowing an operator to choose a
+    different model through the server configuration.
+    """
+
+    from rembg import new_session  # type: ignore
+
+    return new_session(model)
+
+
+def _clean_alpha_edges(image, minimum_alpha: int = 8):
+    """Remove almost-transparent matte noise and clear RGB fringe pixels.
+
+    Segmentation models generally return a good alpha matte, but RGB values
+    from the old background can remain in fully transparent pixels. Those
+    values become a visible white/green halo after repeated compositing. Keep
+    useful semi-transparent fur while dropping only the very weakest noise.
+    """
+
+    from PIL import Image
+
+    image = image.convert("RGBA")
+    alpha = image.getchannel("A").point(
+        lambda value: 0 if value < minimum_alpha else value
+    )
+    image.putalpha(alpha)
+    # Use Pillow's native compositing instead of a Python pixel loop; AI jobs
+    # may contain dozens of 1024px frames and this path must stay affordable.
+    transparent = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    nonzero = alpha.point(lambda value: 255 if value else 0)
+    return Image.composite(image, transparent, nonzero)
 
 
 def _remove_simple_background(image, tolerance: int = 28):
@@ -71,27 +113,56 @@ def _remove_simple_background(image, tolerance: int = 28):
     return image
 
 
-def _remove_background(image, use_rembg: bool = False, background_mode: Optional[str] = None):
+def _remove_background(
+    image,
+    use_rembg: bool = False,
+    background_mode: Optional[str] = None,
+    rembg_model: Optional[str] = None,
+):
     from PIL import Image
 
     mode = str(background_mode or ("rembg" if use_rembg else "simple")).strip().lower()
     if mode == "none":
-        return image.convert("RGBA")
+        return _clean_alpha_edges(image)
 
     if mode in {"auto", "rembg"} or use_rembg:
         try:
             from rembg import remove  # type: ignore
 
             source = BytesIO()
-            image.save(source, format="PNG")
-            result = remove(source.getvalue())
-            return Image.open(BytesIO(result)).convert("RGBA")
-        except Exception:
-            # The optional model is deliberately best-effort. The generated
-            # package is still useful with the simple fallback below.
+            image.convert("RGBA").save(source, format="PNG")
+            model = str(rembg_model or DEFAULT_REMBG_MODEL).strip() or DEFAULT_REMBG_MODEL
+            session = _rembg_session(model)
+            options = {
+                "session": session,
+                "alpha_matting": True,
+                "alpha_matting_foreground_threshold": 240,
+                "alpha_matting_background_threshold": 10,
+                "alpha_matting_erode_size": 10,
+                "post_process_mask": True,
+            }
+            try:
+                result = remove(source.getvalue(), **options)
+            except TypeError:
+                # Older rembg versions do not expose every alpha-matting
+                # option. Keep the model path working across server images.
+                result = remove(
+                    source.getvalue(),
+                    session=session,
+                    alpha_matting=True,
+                )
+            with Image.open(BytesIO(result)) as output:
+                return _clean_alpha_edges(output.convert("RGBA"))
+        except Exception as error:
+            if mode == "rembg":
+                raise RuntimeError(
+                    "服务端 rembg 抠图模型不可用，请检查 rembg 安装、REMBG_MODEL 和模型权重下载"
+                ) from error
+            # ``auto`` remains useful for local previews and development
+            # environments where model weights are intentionally omitted.
             pass
 
-    return _remove_simple_background(image)
+    return _clean_alpha_edges(_remove_simple_background(image))
 
 
 def subject_bbox(image) -> Optional[Tuple[int, int, int, int]]:
@@ -323,15 +394,37 @@ def normalize_pet_image(
     background_mode: Optional[str] = None,
     anchor: str = "center",
     subject_scale: float = 1.0,
+    rembg_model: Optional[str] = None,
 ) -> None:
     """Normalize one user photo to a transparent, pose-aligned square PNG.
 
     ``anchor="bottom"`` keeps the subject's baseline stable across walking
     frames.  A center anchor remains the default for backwards compatibility
     and works better for curled sleeping poses.  ``background_mode`` accepts
-    ``none``, ``simple``, ``rembg`` or ``auto``; the latter two gracefully
-    fall back to the lightweight border flood-fill when rembg is unavailable.
+    ``none``, ``simple``, ``rembg`` or ``auto``. ``auto`` gracefully falls
+    back to the lightweight border flood-fill; strict ``rembg`` mode raises a
+    clear error when the server model is unavailable.
     """
+
+    normalize_pet_sequence(
+        [source_path],
+        [destination_path],
+        canvas_size=canvas_size,
+        use_rembg=use_rembg,
+        background_mode=background_mode,
+        anchor=anchor,
+        subject_scale=subject_scale,
+        rembg_model=rembg_model,
+    )
+
+
+def _prepare_subject(
+    source_path: Path,
+    use_rembg: bool,
+    background_mode: Optional[str],
+    rembg_model: Optional[str],
+):
+    """Read, orient, segment, and crop one source without resizing it."""
 
     from PIL import Image, ImageOps
 
@@ -342,26 +435,58 @@ def normalize_pet_image(
         image,
         use_rembg=use_rembg,
         background_mode=background_mode,
+        rembg_model=rembg_model,
     )
-    alpha = image.getchannel("A")
-    bbox = alpha.getbbox()
-    if bbox:
-        image = image.crop(bbox)
+    bbox = image.getchannel("A").getbbox()
+    if not bbox:
+        raise ValueError(f"无法从照片中读取有效主体: {source_path}")
+    return image.crop(bbox)
 
-    if image.width == 0 or image.height == 0:
-        raise ValueError(f"无法从照片中读取有效图像: {source_path}")
 
+def normalize_pet_sequence(
+    source_paths: Sequence[Path],
+    destination_paths: Sequence[Path],
+    canvas_size: int = 320,
+    use_rembg: bool = False,
+    background_mode: Optional[str] = None,
+    anchor: str = "center",
+    subject_scale: float = 1.0,
+    rembg_model: Optional[str] = None,
+) -> None:
+    """Normalize a complete action sequence with one shared render contract.
+
+    Every frame is segmented before it is resized, then rendered to the same
+    square canvas, subject extent, horizontal center, and optional baseline.
+    Processing the sequence together prevents per-frame padding and placement
+    decisions from becoming another source of motion jitter.
+    """
+
+    from PIL import Image
+
+    if len(source_paths) != len(destination_paths):
+        raise ValueError("动作帧源文件和目标文件数量不一致")
+    if not source_paths:
+        return
+
+    prepared = [
+        _prepare_subject(path, use_rembg, background_mode, rembg_model)
+        for path in source_paths
+    ]
     padding = max(4, int(canvas_size * 0.08))
     try:
         scale = float(subject_scale)
     except (TypeError, ValueError):
         scale = 1.0
     scale = max(0.5, min(1.0, scale))
-    target_size = max(1, round((canvas_size - padding * 2) * scale))
-    image.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
 
-    canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-    _paste_subject(canvas, image, padding, anchor)
+    # Use one target extent for the whole sequence: no frame is allowed to
+    # choose its own crop scale or padding.
+    target_extent = max(1, round((canvas_size - padding * 2) * scale))
 
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(destination_path, format="PNG", optimize=True)
+    for source, destination in zip(prepared, destination_paths):
+        image = source.copy()
+        image.thumbnail((target_extent, target_extent), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        _paste_subject(canvas, image, padding, anchor)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(destination, format="PNG", optimize=True)

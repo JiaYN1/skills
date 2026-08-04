@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    U2NET_HOME=/data/rembg
 
 WORKDIR /app
 
@@ -14,4 +15,3 @@ RUN mkdir -p /data
 
 EXPOSE 8000
 CMD ["uvicorn", "server.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

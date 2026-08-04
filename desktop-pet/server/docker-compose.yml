@@ -8,8 +8,8 @@ services:
       - .env
     environment:
       DATA_DIR: /data
+      U2NET_HOME: /data/rembg
     ports:
       - "8000:8000"
     volumes:
       - ./data:/data
-
