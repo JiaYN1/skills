@@ -226,24 +226,19 @@ class OpenAICompatibleImageProvider:
             if pose_consistency
             else "Keep the animal recognizable and full-body in every frame."
         )
-        if transparent_background is True:
-            background = (
-                "Background removal is mandatory. Isolate only the pet from every input image and "
-                "return a PNG with a fully transparent background and a clean alpha channel. "
-                "Do not draw white, green, checkerboard, room, floor, or cast-shadow pixels behind it."
-            )
-        elif transparent_background is False:
-            background = (
-                "This model does not support transparent output parameters. Background removal is still "
-                "mandatory: isolate only the pet and return a PNG with an actual transparent alpha "
-                "channel. Do not draw white, green, checkerboard, room, floor, or shadow pixels; "
-                "the server will not remove the background afterward."
-            )
-        else:
-            background = (
-                "Background removal is mandatory. Return a PNG with a fully transparent background "
-                "and a clean alpha channel; do not draw a white, green, checkerboard, room, floor, "
-                "or cast-shadow background."
+        background = (
+            "Output settings: transparent background enabled. Prefer the image model's native "
+            "transparent-background mode and return a PNG with a fully transparent background, "
+            "a real RGBA color model, and a clean alpha channel around the pet. Isolate only the "
+            "pet; do not place it in a scene and do not draw a room, floor, white/green backdrop, "
+            "checkerboard pattern, or cast shadow. If this endpoint cannot encode alpha, use one "
+            "perfectly uniform white background (#FFFFFF) with no texture or shadow as a compatibility "
+            "fallback; never invent a detailed background."
+        )
+        if transparent_background is False:
+            background += (
+                " The API request may omit the background parameter for model compatibility, but "
+                "the transparent-background output setting still applies to the prompt."
             )
         return (
             "Use case: identity-preserve. Asset type: a frame-by-frame 2D desktop-pet animation. "

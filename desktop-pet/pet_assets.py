@@ -341,9 +341,10 @@ def normalize_pet_image(
     ``anchor="bottom"`` keeps the subject's baseline stable across walking
     frames.  A center anchor remains the default for backwards compatibility
     and works better for curled sleeping poses.  ``background_mode`` accepts
-    ``none`` or a Pillow-only simple-color fallback. When
-    ``require_transparency`` is true, an opaque AI response is rejected instead
-    of being packaged with an accidental white/green background.
+    ``none`` or a Pillow-only simple-color fallback. ``require_transparency``
+    remains available as an explicit strict mode for callers that require
+    native alpha; the server's normal AI path uses the simple fallback so one
+    opaque gateway response does not fail the whole package.
     """
 
     normalize_pet_sequence(

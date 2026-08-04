@@ -77,6 +77,28 @@ class PetAssetTests(unittest.TestCase):
                     require_transparency=True,
                 )
 
+    def test_normalize_opaque_ai_frame_uses_simple_fallback(self):
+        from PIL import ImageDraw
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "opaque-ai-frame.png"
+            destination = root / "assets" / "frame.png"
+            image = Image.new("RGB", (80, 80), (255, 255, 255))
+            ImageDraw.Draw(image).ellipse((20, 12, 60, 68), fill=(180, 80, 60))
+            image.save(source)
+
+            normalize_pet_sequence(
+                [source],
+                [destination],
+                canvas_size=64,
+                background_mode="simple",
+            )
+
+            with Image.open(destination) as normalized:
+                self.assertEqual(normalized.mode, "RGBA")
+                self.assertEqual(normalized.getpixel((0, 0))[3], 0)
+
     def test_split_contact_sheet_returns_individual_frames(self):
         from PIL import ImageDraw
 

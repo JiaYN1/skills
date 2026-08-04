@@ -90,10 +90,14 @@ async def build_pet_package(
             selected_sources,
             destinations,
             canvas_size=320,
-            background_mode="none",
+            # Prefer the alpha channel requested in the AI prompt. Some
+            # compatible gateways still return an opaque PNG; the simple
+            # Pillow fallback removes only a connected flat border so one
+            # imperfect frame does not fail the whole job. It does not use
+            # rembg or another local segmentation model.
+            background_mode="simple",
             anchor=ROLE_ANCHORS.get(role, "center"),
             subject_scale=0.96,
-            require_transparency=bool(generated),
         )
         config_assets[role] = [
             f"assets/{destination.name}" for destination in destinations
@@ -121,7 +125,7 @@ async def build_pet_package(
             "ai_frame_count": ai_frame_total,
             "ai_error_count": ai_error_count,
             "frame_counts": {role: len(config_assets.get(role, [])) for role in ROLES},
-            "background_removal": "ai-prompt",
+            "background_removal": "ai-prompt+simple-fallback",
             "pose_consistency": bool(getattr(settings, "pose_consistency", True)),
         },
     }
