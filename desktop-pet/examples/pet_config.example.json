@@ -15,6 +15,7 @@
     "version": 1,
     "mode": "hybrid",
     "fps": 10,
+    "frame_repeat": 1,
     "skeleton_path": "skeleton.json",
     "sequences": {
       "walk": {

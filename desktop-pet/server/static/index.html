@@ -69,7 +69,12 @@
                 播放 FPS
                 <input id="ai-animation-fps" type="number" min="1" max="60" />
               </label>
+              <label>
+                每帧保持次数
+                <input id="ai-frame-repeat" type="number" min="1" max="4" />
+              </label>
             </div>
+            <p class="hint">保持次数只增加单帧停留时间；动作内容突变请在生成后的预览中勾选并删除对应帧。</p>
             <label>
               动画输出格式
               <select id="ai-animation-mode">
@@ -141,7 +146,11 @@
               <span class="eyebrow">STEP 2</span>
               <h2>动作资源预览</h2>
             </div>
-            <span class="preview-status">生成的 PNG 帧</span>
+            <span class="preview-status">生成的 PNG 帧，可删除动作突变帧</span>
+          </div>
+          <div class="resource-preview-toolbar">
+            <span id="resource-selection-text" class="hint">勾选突变帧删除，或点击帧下方按钮补帧</span>
+            <button id="remove-selected-frames" class="secondary" type="button" disabled>删除选中帧</button>
           </div>
           <div id="resource-preview-grid" class="preview-grid"></div>
         </section>

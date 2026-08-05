@@ -16,6 +16,7 @@ Windows Worker 和 Windows + AI 交接步骤见 [WINDOWS_WORKER_HANDOFF.md](WIND
 - 服务端先通过 AI 提示词生成透明主体预览，确认后再生成透明动作帧，并提供动作资源预览。
 - 统一的身份参考图、透明化、落地基线和主体比例处理，减少不同动作帧漂移。
 - 服务端可按动作生成默认 16/12 张有序走动/睡觉 PNG，并导出 `animation.json` 与可选 `skeleton.json`。
+- 动画可设置每帧保持次数；动作资源预览支持勾选并删除突变帧，删除后会自动重排并更新下载包。
 - Windows 上通过 PyInstaller 生成包含资源的单文件 exe。
 
 ## Windows 上运行
@@ -68,7 +69,7 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 - 要求 AI 从输入照片中分离宠物主体，并直接返回带真实 alpha 通道的透明 PNG；服务端不再使用本地分割模型。
 - 把第一张照片作为身份锚点，把其余照片作为动作参考，并在提示词中锁定毛色、脸部、比例、镜头、主体缩放和落地基线。
-- 独立设置走动/睡觉帧数（默认 16/12，最多 24）、播放 FPS 和动作输出格式。
+- 独立设置走动/睡觉帧数（默认 16/12，最多 24）、播放 FPS、每帧保持次数（1-4）和动作输出格式。
 
 默认 `hybrid` 模式会同时包含：
 
@@ -78,7 +79,7 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 
 如果只需要位图，可选择 `png`；如果只需要骨骼清单，可选择 `skeleton`。没有 AI 或 AI 失败时，资源包仍会使用照片和同一套骨骼/程序化动画兜底。
 
-动作帧现在按“一个姿态、一个请求、一个 PNG”逐帧生成；后续帧会把上一帧作为时间连续性参考，单帧失败时保留序列位置，避免后续姿态整体错位。每张 AI 动作帧生成后还会再次经过 AI 去背景流程，避免兼容网关把棋盘格或绿幕直接画进 PNG。旧资源包需要重新生成。页面会展示生成的全部 PNG 帧，动画预览也可以运行 `pet_runtime.py` 或最终 exe。
+动作帧现在按“一个姿态、一个请求、一个 PNG”逐帧生成；后续帧会把上一帧作为时间连续性参考，单帧失败时保留序列位置，避免后续姿态整体错位。每张 AI 动作帧生成后还会再次经过 AI 去背景流程，避免兼容网关把棋盘格或绿幕直接画进 PNG。旧资源包需要重新生成。页面会展示生成的全部 PNG 帧，可勾选不和谐的帧后批量删除，也可在两个帧之间以前一帧为参考插入一帧；动画预览也可以运行 `pet_runtime.py` 或最终 exe。
 
 背景要求会写入 AI 提示词并启用透明背景：只保留宠物主体，优先输出带真实 alpha 通道的 RGBA PNG，不要白底、绿底、棋盘格、房间、地面或阴影。`gpt-image-2` 为兼容接口不会发送其不接受的 `background=transparent` 参数；如果网关仍返回不透明图片，动作帧会再次提交给 AI 去背景，服务端再用 Pillow 清理简单边缘，不使用 rembg。
 
@@ -88,6 +89,7 @@ python pet_runtime.py --config generated-pets/我的宠物/pet_config.json
 POSE_CONSISTENCY=true
 ANIMATION_MODE=hybrid
 ANIMATION_FPS=12
+ANIMATION_FRAME_REPEAT=1
 WALK_FRAME_COUNT=16
 SLEEP_FRAME_COUNT=12
 ```

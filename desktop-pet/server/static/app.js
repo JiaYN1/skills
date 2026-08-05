@@ -14,12 +14,15 @@ const confirmPreviewButton = document.querySelector("#confirm-preview");
 const restartPreviewButton = document.querySelector("#restart-preview");
 const resourcePreviewSection = document.querySelector("#resource-preview-section");
 const resourcePreviewGrid = document.querySelector("#resource-preview-grid");
+const resourceSelectionText = document.querySelector("#resource-selection-text");
+const removeSelectedFramesButton = document.querySelector("#remove-selected-frames");
 const adminTokenInput = document.querySelector("#admin-token");
 const aiSettingsForm = document.querySelector("#ai-settings-form");
 const loadAiSettingsButton = document.querySelector("#load-ai-settings");
 const aiSettingsStatus = document.querySelector("#ai-settings-status");
 let currentJobId = null;
 let currentJob = null;
+let selectedResourceFrames = new Set();
 
 function adminHeaders() {
   const token = adminTokenInput.value.trim();
@@ -42,6 +45,7 @@ function fillAiSettings(values) {
   document.querySelector("#ai-walk-frame-count").value = values.walk_frame_count || 16;
   document.querySelector("#ai-sleep-frame-count").value = values.sleep_frame_count || 12;
   document.querySelector("#ai-animation-fps").value = values.animation_fps || 12;
+  document.querySelector("#ai-frame-repeat").value = values.frame_repeat || 1;
   document.querySelector("#ai-animation-mode").value = values.animation_mode || "hybrid";
   document.querySelector("#ai-pose-consistency").checked = values.pose_consistency !== false;
   document.querySelector("#ai-key").value = "";
@@ -50,15 +54,57 @@ function fillAiSettings(values) {
     : "尚未配置 API Key";
 }
 
-function renderPreviewImages(items, section, grid, canRegenerate) {
+function updateResourceSelectionControls(canDelete = false) {
+  const count = selectedResourceFrames.size;
+  resourceSelectionText.textContent = count
+    ? `已选择 ${count} 帧`
+    : "勾选突变帧删除，或点击帧下方按钮补帧";
+  removeSelectedFramesButton.disabled = !canDelete || count === 0;
+}
+
+function renderPreviewImages(items, section, grid, canRegenerate, isResourcePreview = false) {
   grid.replaceChildren();
   if (!Array.isArray(items) || !items.length) {
     section.classList.add("hidden");
+    if (isResourcePreview) {
+      selectedResourceFrames.clear();
+      updateResourceSelectionControls(false);
+    }
     return;
+  }
+  if (isResourcePreview) {
+    const available = new Set(
+      items
+        .filter((item) => item.role != null && item.index != null)
+        .map((item) => `${item.role}:${item.index}`),
+    );
+    selectedResourceFrames = new Set(
+      [...selectedResourceFrames].filter((key) => available.has(key)),
+    );
   }
   for (const item of items) {
     const figure = document.createElement("figure");
     figure.className = "preview-item";
+    const key = item.role != null && item.index != null
+      ? `${item.role}:${item.index}`
+      : null;
+    if (isResourcePreview && key) {
+      const selector = document.createElement("label");
+      selector.className = "frame-select";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedResourceFrames.has(key);
+      checkbox.disabled = !canRegenerate;
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedResourceFrames.add(key);
+        else selectedResourceFrames.delete(key);
+        figure.classList.toggle("selected", checkbox.checked);
+        updateResourceSelectionControls(canRegenerate);
+      });
+      selector.append(checkbox, document.createTextNode("选择删除"));
+      figure.classList.toggle("selected", checkbox.checked);
+      figure.append(selector);
+    }
     const image = document.createElement("img");
     image.src = item.url;
     image.alt = item.name || "宠物预览";
@@ -66,20 +112,35 @@ function renderPreviewImages(items, section, grid, canRegenerate) {
     const caption = document.createElement("figcaption");
     caption.textContent = item.name || "预览图片";
     figure.append(image, caption);
-    if (item.regenerate_url) {
+    const canInsertAfter = isResourcePreview && key && items.some(
+      (candidate) => candidate.role === item.role && candidate.index === item.index + 1,
+    );
+    if (item.regenerate_url || canInsertAfter) {
       const actions = document.createElement("div");
       actions.className = "preview-item-actions";
-      const regenerate = document.createElement("button");
-      regenerate.type = "button";
-      regenerate.className = "secondary preview-regenerate";
-      regenerate.textContent = "重新生成";
-      regenerate.disabled = !canRegenerate;
-      regenerate.addEventListener("click", () => regeneratePreview(item, regenerate));
-      actions.append(regenerate);
+      if (item.regenerate_url) {
+        const regenerate = document.createElement("button");
+        regenerate.type = "button";
+        regenerate.className = "secondary preview-regenerate";
+        regenerate.textContent = "重新生成";
+        regenerate.disabled = !canRegenerate;
+        regenerate.addEventListener("click", () => regeneratePreview(item, regenerate));
+        actions.append(regenerate);
+      }
+      if (canInsertAfter) {
+        const insert = document.createElement("button");
+        insert.type = "button";
+        insert.className = "secondary preview-insert";
+        insert.textContent = "在此后插入一帧";
+        insert.disabled = !canRegenerate;
+        insert.addEventListener("click", () => insertResourceFrame(item, insert));
+        actions.append(insert);
+      }
       figure.append(actions);
     }
     grid.append(figure);
   }
+  if (isResourcePreview) updateResourceSelectionControls(canRegenerate);
   section.classList.remove("hidden");
 }
 
@@ -94,6 +155,29 @@ async function regeneratePreview(item, button) {
     const response = await fetch(item.regenerate_url, { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "重新生成预览失败");
+    showProgress(payload);
+    await poll(currentJobId);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function insertResourceFrame(item, button) {
+  if (!currentJobId || item.role == null || item.index == null || button.disabled) return;
+  if (!window.confirm(`在 ${item.name || `${item.role}_${item.index}.png`} 后插入一帧吗？`)) return;
+  button.disabled = true;
+  submitButton.disabled = true;
+  buildExeButton.disabled = true;
+  selectedResourceFrames.clear();
+  updateResourceSelectionControls(false);
+  try {
+    const response = await fetch(`/api/jobs/${currentJobId}/previews/resource/insert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: item.role, after_index: item.index }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "插入动作帧失败");
     showProgress(payload);
     await poll(currentJobId);
   } catch (error) {
@@ -129,6 +213,7 @@ aiSettingsForm.addEventListener("submit", async (event) => {
       walk_frame_count: Number(document.querySelector("#ai-walk-frame-count").value),
       sleep_frame_count: Number(document.querySelector("#ai-sleep-frame-count").value),
       animation_fps: Number(document.querySelector("#ai-animation-fps").value),
+      frame_repeat: Number(document.querySelector("#ai-frame-repeat").value),
       animation_mode: document.querySelector("#ai-animation-mode").value,
       pose_consistency: document.querySelector("#ai-pose-consistency").checked,
       clear_api_key: document.querySelector("#ai-clear-key").checked,
@@ -181,11 +266,45 @@ function showProgress(job) {
     resourcePreviewSection,
     resourcePreviewGrid,
     job.status === "ready" && job.artifact_kind === "zip",
+    true,
   );
   confirmPreviewButton.disabled = job.status !== "preview_ready";
   restartPreviewButton.disabled = job.status !== "preview_ready";
   buildExeButton.disabled = !canBuildExe;
 }
+
+async function removeSelectedFrames() {
+  if (!currentJobId || !selectedResourceFrames.size || removeSelectedFramesButton.disabled) return;
+  const frames = {};
+  for (const key of selectedResourceFrames) {
+    const separator = key.lastIndexOf(":");
+    const role = key.slice(0, separator);
+    const index = Number(key.slice(separator + 1));
+    if (!frames[role]) frames[role] = [];
+    frames[role].push(index);
+  }
+  const count = selectedResourceFrames.size;
+  if (!window.confirm(`确定删除选中的 ${count} 帧吗？删除后会重排帧号并更新下载包。`)) return;
+  removeSelectedFramesButton.disabled = true;
+  submitButton.disabled = true;
+  buildExeButton.disabled = true;
+  try {
+    const response = await fetch(`/api/jobs/${currentJobId}/previews/resource/remove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frames }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "删除动作帧失败");
+    selectedResourceFrames.clear();
+    showProgress(payload);
+    await poll(currentJobId);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+removeSelectedFramesButton.addEventListener("click", removeSelectedFrames);
 
 function canQueueExeBuild(job) {
   return Boolean(
@@ -242,6 +361,9 @@ function showError(error) {
   resumeGenerationButton.disabled = !(
     currentJob && currentJob.status === "failed" && currentJob.resume_url
   );
+  updateResourceSelectionControls(Boolean(
+    currentJob && currentJob.status === "ready" && currentJob.artifact_kind === "zip",
+  ));
   progress.classList.remove("hidden");
   statusText.textContent = "failed";
   messageText.textContent = error.message || String(error);
@@ -262,6 +384,8 @@ form.addEventListener("submit", async (event) => {
   resumeGenerationButton.disabled = true;
   previewGrid.replaceChildren();
   resourcePreviewGrid.replaceChildren();
+  selectedResourceFrames.clear();
+  updateResourceSelectionControls(false);
   confirmPreviewButton.disabled = true;
   restartPreviewButton.disabled = true;
   const body = new FormData(form);
@@ -306,6 +430,8 @@ restartPreviewButton.addEventListener("click", () => {
   resourcePreviewSection.classList.add("hidden");
   previewGrid.replaceChildren();
   resourcePreviewGrid.replaceChildren();
+  selectedResourceFrames.clear();
+  updateResourceSelectionControls(false);
   confirmPreviewButton.disabled = true;
   restartPreviewButton.disabled = true;
   submitButton.disabled = false;

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pet_animation import (
     DEFAULT_FRAME_COUNTS,
+    DEFAULT_FRAME_REPEAT,
     build_animation_manifest,
     build_skeleton_manifest,
     pose_plan_for,
@@ -46,6 +47,23 @@ class PetAnimationTests(unittest.TestCase):
         self.assertEqual(skeleton["format"], "desktop-pet-skeleton")
         self.assertEqual(skeleton["animations"]["sleep"]["fps"], 12)
         self.assertEqual(len(skeleton["animations"]["walk"]["frames"]), 8)
+
+    def test_manifest_records_frame_hold_without_copying_source_paths(self):
+        assets = {"walk": ["assets/walk_0.png", "assets/walk_1.png"]}
+
+        manifest = build_animation_manifest(
+            assets,
+            mode="png",
+            fps=10,
+            frame_repeat=3,
+        )
+
+        sequence = manifest["sequences"]["walk"]
+        self.assertEqual(DEFAULT_FRAME_REPEAT, 1)
+        self.assertEqual(manifest["frame_repeat"], 3)
+        self.assertEqual(sequence["frames"], assets["walk"])
+        self.assertEqual(sequence["effective_frame_count"], 6)
+        self.assertEqual(sequence["effective_frame_duration_ms"], 300)
 
     def test_write_bundle_persists_json_files(self):
         with tempfile.TemporaryDirectory() as temporary:

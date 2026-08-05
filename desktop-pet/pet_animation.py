@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 ANIMATION_ROLES = ("idle", "walk", "sleep", "react")
 DEFAULT_ANIMATION_FPS = 12
+DEFAULT_FRAME_REPEAT = 1
+MAX_FRAME_REPEAT = 4
 MAX_FRAME_COUNT = 24
 DEFAULT_FRAME_COUNTS = {
     "idle": 8,
@@ -81,6 +83,16 @@ def normalize_animation_mode(value: Optional[str]) -> str:
 
     mode = str(value or "hybrid").strip().lower()
     return mode if mode in ANIMATION_MODES else "hybrid"
+
+
+def normalize_frame_repeat(value: Optional[int] = None) -> int:
+    """Clamp how many display ticks each source frame should hold."""
+
+    try:
+        repeat = int(value) if value is not None else DEFAULT_FRAME_REPEAT
+    except (TypeError, ValueError):
+        repeat = DEFAULT_FRAME_REPEAT
+    return max(1, min(MAX_FRAME_REPEAT, repeat))
 
 
 def frame_count_for_role(role: str, requested: Optional[int] = None) -> int:
@@ -200,10 +212,13 @@ def _bone_transforms(role: str, index: int, count: int) -> Dict[str, Dict[str, f
 def build_skeleton_manifest(
     assets: Mapping[str, Sequence[str]],
     fps: int = DEFAULT_ANIMATION_FPS,
+    frame_repeat: int = DEFAULT_FRAME_REPEAT,
 ) -> Dict[str, Any]:
     """Build a portable, sprite-backed 2D skeleton animation manifest."""
 
     frame_rate = max(1, min(60, int(fps)))
+    repeat = normalize_frame_repeat(frame_repeat)
+    frame_duration_ms = round(1000.0 / frame_rate)
     bones = [
         _bone("root", None),
         _bone("body", "root", 0.8),
@@ -222,13 +237,16 @@ def build_skeleton_manifest(
         animations[role] = {
             "loop": role not in {"react"},
             "fps": frame_rate,
+            "frame_repeat": repeat,
+            "effective_frame_count": count * repeat,
             "poses": pose_plan_for(role, count),
             "source_frame_count": len(source_paths),
             "frames": [
                 {
                     "index": index,
                     "sprite": frame_path,
-                    "duration_ms": round(1000.0 / frame_rate),
+                    "duration_ms": frame_duration_ms,
+                    "effective_duration_ms": frame_duration_ms * repeat,
                     "bones": _bone_transforms(role, index, count),
                 }
                 for index, frame_path in enumerate(frame_paths)
@@ -238,6 +256,7 @@ def build_skeleton_manifest(
     return {
         "format": "desktop-pet-skeleton",
         "version": 1,
+        "frame_repeat": repeat,
         "render_mode": "sprite-per-frame",
         "notes": "Photo pets use a sprite-backed root rig; generated PNGs remain the visual source of truth.",
         "bones": bones,
@@ -250,11 +269,14 @@ def build_animation_manifest(
     assets: Mapping[str, Sequence[str]],
     mode: str = "hybrid",
     fps: int = DEFAULT_ANIMATION_FPS,
+    frame_repeat: int = DEFAULT_FRAME_REPEAT,
 ) -> Dict[str, Any]:
     """Return the package-level animation manifest shared by all runtimes."""
 
     normalized_mode = normalize_animation_mode(mode)
     frame_rate = max(1, min(60, int(fps)))
+    repeat = normalize_frame_repeat(frame_repeat)
+    frame_duration_ms = round(1000.0 / frame_rate)
     sequences: Dict[str, Any] = {}
     for role in ANIMATION_ROLES:
         source_paths = [str(item) for item in assets.get(role, [])]
@@ -264,7 +286,10 @@ def build_animation_manifest(
         sequences[role] = {
             "loop": role != "react",
             "fps": frame_rate,
-            "frame_duration_ms": round(1000.0 / frame_rate),
+            "frame_duration_ms": frame_duration_ms,
+            "frame_repeat": repeat,
+            "effective_frame_count": len(frame_paths) * repeat,
+            "effective_frame_duration_ms": frame_duration_ms * repeat,
             "frames": frame_paths,
             "pose_plan": pose_plan_for(role, len(frame_paths)),
             "source_frame_count": len(source_paths),
@@ -275,6 +300,7 @@ def build_animation_manifest(
         "version": 1,
         "mode": normalized_mode,
         "fps": frame_rate,
+        "frame_repeat": repeat,
         "sequences": sequences,
     }
     if normalized_mode in {"skeleton", "hybrid"}:
@@ -287,17 +313,28 @@ def write_animation_bundle(
     assets: Mapping[str, Sequence[str]],
     mode: str = "hybrid",
     fps: int = DEFAULT_ANIMATION_FPS,
+    frame_repeat: int = DEFAULT_FRAME_REPEAT,
 ) -> Dict[str, Any]:
     """Write ``animation.json`` and, when requested, ``skeleton.json``."""
 
     package_dir.mkdir(parents=True, exist_ok=True)
-    manifest = build_animation_manifest(assets, mode=mode, fps=fps)
+    repeat = normalize_frame_repeat(frame_repeat)
+    manifest = build_animation_manifest(
+        assets,
+        mode=mode,
+        fps=fps,
+        frame_repeat=repeat,
+    )
     (package_dir / "animation.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     if "skeleton_path" in manifest:
-        skeleton = build_skeleton_manifest(assets, fps=fps)
+        skeleton = build_skeleton_manifest(
+            assets,
+            fps=fps,
+            frame_repeat=repeat,
+        )
         (package_dir / "skeleton.json").write_text(
             json.dumps(skeleton, ensure_ascii=False, indent=2),
             encoding="utf-8",

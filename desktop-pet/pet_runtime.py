@@ -263,6 +263,10 @@ class PetWindow:
             self.animation_fps = max(1.0, min(60.0, float(config.animation.get("fps", 12))))
         except (TypeError, ValueError):
             self.animation_fps = 12.0
+        try:
+            self.frame_repeat = max(1, min(4, int(config.animation.get("frame_repeat", 1))))
+        except (TypeError, ValueError):
+            self.frame_repeat = 1
         self.frame_interval = 1.0 / self.animation_fps
         # Poll at least twice per frame so a high-FPS configuration does not
         # skip frames. The image item itself is updated in place below; this is
@@ -525,6 +529,19 @@ class PetWindow:
                     pass
         return defaults.get(role, 8)
 
+    def _frame_repeat(self, role: str) -> int:
+        """Return the hold count for a role, with a manifest-level fallback."""
+
+        repeat = getattr(self, "frame_repeat", 1)
+        sequences = self.config.animation.get("sequences", {})
+        sequence = sequences.get(role, {}) if isinstance(sequences, dict) else {}
+        if isinstance(sequence, dict) and sequence.get("frame_repeat") is not None:
+            try:
+                repeat = int(sequence["frame_repeat"])
+            except (TypeError, ValueError):
+                pass
+        return max(1, min(4, repeat))
+
     def _load_animation_frames(self) -> Dict[str, List[Any]]:
         sources = self._source_images()
         frames: Dict[str, List[Any]] = {}
@@ -544,7 +561,7 @@ class PetWindow:
                     image = self._fit_image(source)
                 else:
                     image = self._animation_frame(source, role, index)
-                rendered.append(image)
+                rendered.extend([image] * self._frame_repeat(role))
             frames[role] = rendered
         return frames
 
@@ -587,7 +604,11 @@ class PetWindow:
     def _on_release(self, _event):
         if not self.dragged:
             self.last_interaction = time.monotonic()
-            self._enter_state("react", 1.2)
+            react_duration = max(
+                1.2,
+                len(self.frames["react"]) * self.frame_interval,
+            )
+            self._enter_state("react", react_duration)
         self.drag_start = None
 
     def _show_menu(self, event):

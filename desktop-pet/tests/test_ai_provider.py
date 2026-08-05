@@ -131,6 +131,46 @@ class ActionFrameRequestFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([path.name for path in requests[1][1]], ["identity.png", "walk_0.png"])
         self.assertIn("immediately preceding animation frame", requests[1][0])
 
+    async def test_inserted_frame_uses_only_the_previous_frame_as_continuity_reference(self):
+        settings = SimpleNamespace(
+            ai_enabled=True,
+            ai_api_key="test-key",
+            ai_image_model="gpt-image-2",
+            ai_frame_count=3,
+            ai_max_references=2,
+            pose_consistency=True,
+        )
+        provider = OpenAICompatibleImageProvider(settings)
+        requests = []
+
+        async def fake_single_image(prompt, references, output_path):
+            requests.append((prompt, references, output_path))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"image")
+            return output_path
+
+        provider._generate_single_image = fake_single_image
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = root / "identity.png"
+            previous = root / "walk_0.png"
+            identity.write_bytes(b"identity")
+            previous.write_bytes(b"previous")
+
+            await provider.generate_action_frame(
+                [previous],
+                "walk",
+                root / "inserted.png",
+                identity_reference=identity,
+                frame_index=1,
+                frame_count=4,
+                continuity_reference=True,
+            )
+
+        self.assertEqual([path.name for path in requests[0][1]], ["identity.png", "walk_0.png"])
+        self.assertIn("immediately preceding animation frame", requests[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

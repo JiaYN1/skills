@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hmac
+import json
 import shutil
 import sys
+import uuid
 import zipfile
 from urllib.parse import quote
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pet_assets import normalize_pet_image, normalize_pet_sequence  # noqa: E402
+from pet_animation import write_animation_bundle  # noqa: E402
 from pet_common import ROLES, assign_roles  # noqa: E402
 
 store = JobStore(settings.data_dir)
@@ -44,6 +47,7 @@ class AISettingsUpdate(BaseModel):
     pose_consistency: Optional[bool] = None
     animation_mode: Optional[str] = None
     animation_fps: Optional[int] = Field(default=None, ge=1, le=60)
+    frame_repeat: Optional[int] = Field(default=None, ge=1, le=4)
     walk_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
     sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
 
@@ -51,6 +55,15 @@ class AISettingsUpdate(BaseModel):
 class GenerateFromPreviewRequest(BaseModel):
     name: Optional[str] = None
     build_exe: bool = False
+
+
+class RemoveResourceFramesRequest(BaseModel):
+    frames: Dict[str, List[int]]
+
+
+class InsertResourceFrameRequest(BaseModel):
+    role: str
+    after_index: int = Field(..., ge=0, le=23)
 
 if settings.cors_origins:
     app.add_middleware(
@@ -308,6 +321,8 @@ def regenerate_resource_preview(
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后重新生成单帧")
+    if record.get("artifact_kind") != "zip":
+        raise HTTPException(409, "请在打包 Windows exe 之前重新生成动作帧")
     if role not in ROLES or index < 0:
         raise HTTPException(404, "动作帧不存在")
     meta = _resource_frame_meta(record, role, index)
@@ -328,6 +343,113 @@ def regenerate_resource_preview(
         message=f"正在重新生成 {role}_{index}.png",
     )
     background_tasks.add_task(_run_resource_regeneration, job_id, meta)
+    return _public_job(store.read(job_id))
+
+
+@app.post("/api/jobs/{job_id}/previews/resource/remove")
+def remove_resource_frames(
+    job_id: str,
+    payload: RemoveResourceFramesRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """Remove selected action frames and rebuild the downloadable package."""
+
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if record.get("status") != "ready":
+        raise HTTPException(409, "请在动作资源生成完成后删除帧")
+    if record.get("artifact_kind") != "zip":
+        raise HTTPException(409, "请在打包 Windows exe 之前删除动作帧")
+    if not payload.frames:
+        raise HTTPException(400, "至少选择一帧动作帧")
+
+    metadata = [
+        item
+        for item in record.get("resource_frame_meta", [])
+        if isinstance(item, dict)
+    ]
+    requested: Dict[str, List[int]] = {}
+    for role, raw_indices in payload.frames.items():
+        if role not in ROLES:
+            raise HTTPException(400, f"不支持的动作：{role}")
+        indices = sorted(set(int(index) for index in raw_indices))
+        if not indices:
+            raise HTTPException(400, f"{role} 至少选择一帧")
+        role_indices = {
+            int(item["index"])
+            for item in metadata
+            if item.get("role") == role and item.get("index") is not None
+        }
+        if not set(indices).issubset(role_indices):
+            raise HTTPException(404, f"{role} 中存在不存在的动作帧")
+        if len(role_indices) - len(indices) < 1:
+            raise HTTPException(409, f"{role} 至少需要保留一帧")
+        requested[role] = indices
+
+    removed_count = sum(len(indices) for indices in requested.values())
+    store.update(
+        job_id,
+        status="resource_editing",
+        progress=99,
+        message=f"正在删除 {removed_count} 帧并更新资源包",
+        error="",
+    )
+    background_tasks.add_task(_run_resource_frame_removal, job_id, requested)
+    return _public_job(store.read(job_id))
+
+
+@app.post("/api/jobs/{job_id}/previews/resource/insert")
+def insert_resource_frame(
+    job_id: str,
+    payload: InsertResourceFrameRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """Insert one AI-generated frame after an existing action frame."""
+
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+
+    if record.get("status") != "ready":
+        raise HTTPException(409, "请在动作资源生成完成后插入帧")
+    if record.get("artifact_kind") != "zip":
+        raise HTTPException(409, "请在打包 Windows exe 之前插入动作帧")
+    if payload.role not in ROLES:
+        raise HTTPException(400, f"不支持的动作：{payload.role}")
+
+    role_meta = [
+        dict(item)
+        for item in record.get("resource_frame_meta", [])
+        if isinstance(item, dict) and item.get("role") == payload.role
+    ]
+    role_meta.sort(key=lambda item: int(item.get("index", 0)))
+    if len(role_meta) >= 24:
+        raise HTTPException(409, "单个动作最多保留 24 帧")
+    if payload.after_index >= len(role_meta) - 1:
+        raise HTTPException(409, "只能在两帧之间插入新帧")
+    if (
+        payload.after_index < 0
+        or int(role_meta[payload.after_index].get("index", -1)) != payload.after_index
+    ):
+        raise HTTPException(404, "参考动作帧不存在")
+
+    store.update(
+        job_id,
+        status="resource_editing",
+        progress=99,
+        message=f"正在根据 {payload.role}_{payload.after_index}.png 插入新帧",
+        error="",
+    )
+    background_tasks.add_task(
+        _run_resource_frame_insertion,
+        job_id,
+        payload.role,
+        payload.after_index,
+    )
     return _public_job(store.read(job_id))
 
 
@@ -606,6 +728,326 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
         )
 
 
+def _run_resource_frame_removal(
+    job_id: str,
+    requested: Dict[str, List[int]],
+) -> None:
+    """Apply a batch frame edit and keep all package metadata in sync."""
+
+    try:
+        record = store.read(job_id)
+        job_dir = store.job_dir(job_id)
+        package_dir = job_dir / "package"
+        config_path = package_dir / "pet_config.json"
+        if not config_path.is_file():
+            raise ValueError("资源包配置文件不存在")
+
+        all_meta = [
+            dict(item)
+            for item in record.get("resource_frame_meta", [])
+            if isinstance(item, dict)
+        ]
+        updated_meta = all_meta
+        config_data = json.loads(config_path.read_text(encoding="utf-8"))
+        config_assets = config_data.get("assets")
+        if not isinstance(config_assets, dict):
+            config_assets = {}
+
+        for role, removed_indices in requested.items():
+            role_items = [
+                item
+                for item in all_meta
+                if item.get("role") == role
+            ]
+            role_items.sort(key=lambda item: int(item.get("index", 0)))
+            removed = set(removed_indices)
+            remaining = [
+                item for item in role_items
+                if int(item.get("index", -1)) not in removed
+            ]
+            if not remaining:
+                raise ValueError(f"{role} 至少需要保留一帧")
+            remapped_role_meta, new_asset_paths = _rewrite_resource_role_assets(
+                job_dir,
+                package_dir,
+                role,
+                remaining,
+            )
+            updated_meta = _replace_resource_role_metadata(
+                updated_meta,
+                role,
+                remapped_role_meta,
+            )
+            config_assets[role] = new_asset_paths
+
+        animation_config = config_data.get("animation")
+        if not isinstance(animation_config, dict):
+            animation_config = {}
+        animation_manifest = write_animation_bundle(
+            package_dir,
+            config_assets,
+            mode=animation_config.get("mode", "hybrid"),
+            fps=animation_config.get("fps", getattr(settings, "animation_fps", 12)),
+            frame_repeat=animation_config.get("frame_repeat", getattr(settings, "frame_repeat", 1)),
+        )
+        config_data["assets"] = config_assets
+        config_data["animation"] = animation_manifest
+        generation = config_data.get("generation")
+        if not isinstance(generation, dict):
+            generation = {}
+        frame_counts = generation.get("frame_counts")
+        if not isinstance(frame_counts, dict):
+            frame_counts = {}
+        for role in requested:
+            frame_counts[role] = sum(1 for item in updated_meta if item.get("role") == role)
+        generation["frame_counts"] = frame_counts
+        generation["removed_frame_count"] = int(generation.get("removed_frame_count", 0)) + sum(
+            len(indices) for indices in requested.values()
+        )
+        config_data["generation"] = generation
+        config_path.write_text(
+            json.dumps(config_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        zip_path = Path(record["package_path"])
+        _rebuild_package_archive(package_dir, zip_path)
+        resource_preview_paths = [
+            str(item["asset_path"])
+            for item in updated_meta
+            if item.get("asset_path")
+        ]
+        revision = int(record.get("resource_preview_revision", 0)) + 1
+        removed_count = sum(len(indices) for indices in requested.values())
+        store.update(
+            job_id,
+            status="ready",
+            progress=100,
+            message=f"已删除 {removed_count} 帧，资源包已更新",
+            resource_preview_paths=resource_preview_paths,
+            resource_frame_meta=updated_meta,
+            resource_preview_revision=revision,
+            frame_repeat=animation_manifest.get("frame_repeat", 1),
+            error="",
+        )
+    except Exception as error:
+        store.update(
+            job_id,
+            status="ready",
+            progress=100,
+            message=f"删除动作帧失败，已保留当前资源：{str(error)[-2000:]}",
+            error=str(error)[-4000:],
+        )
+
+
+def _rewrite_resource_role_assets(
+    job_dir: Path,
+    package_dir: Path,
+    role: str,
+    role_items: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Normalize one edited role and return its remapped metadata/assets."""
+
+    frame_count = len(role_items)
+    remapped: List[Dict[str, Any]] = []
+    sources: List[Path] = []
+    destinations: List[Path] = []
+    asset_paths: List[str] = []
+    job_root = job_dir.resolve()
+    for new_index, item in enumerate(role_items):
+        updated = dict(item)
+        asset_path = f"package/assets/{role}_{new_index}.png"
+        updated.update(
+            index=new_index,
+            frame_count=frame_count,
+            asset_path=asset_path,
+        )
+        source = (job_dir / str(item["source_path"])).resolve()
+        if job_root not in source.parents or not source.is_file():
+            raise ValueError(f"{role} 的参考文件不存在")
+        remapped.append(updated)
+        sources.append(source)
+        destinations.append(package_dir / "assets" / f"{role}_{new_index}.png")
+        asset_paths.append(f"assets/{role}_{new_index}.png")
+
+    normalize_pet_sequence(
+        sources,
+        destinations,
+        canvas_size=320,
+        background_mode="simple",
+        anchor=ROLE_ANCHORS.get(role, "center"),
+        subject_scale=0.96,
+    )
+    assets_dir = package_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    desired = {path.resolve() for path in destinations}
+    for stale in assets_dir.glob(f"{role}_*.png"):
+        if stale.resolve() not in desired:
+            stale.unlink()
+    return remapped, asset_paths
+
+
+def _replace_resource_role_metadata(
+    all_meta: List[Dict[str, Any]],
+    role: str,
+    role_meta: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Replace one role's contiguous block while preserving other roles."""
+
+    updated_meta: List[Dict[str, Any]] = []
+    inserted = False
+    for item in all_meta:
+        if item.get("role") != role:
+            updated_meta.append(item)
+            continue
+        if not inserted:
+            updated_meta.extend(role_meta)
+            inserted = True
+    if not inserted:
+        updated_meta.extend(role_meta)
+    return updated_meta
+
+
+async def _run_resource_frame_insertion(
+    job_id: str,
+    role: str,
+    after_index: int,
+) -> None:
+    """Generate a frame from the previous frame and rebuild the package."""
+
+    try:
+        record = store.read(job_id)
+        job_dir = store.job_dir(job_id)
+        package_dir = job_dir / "package"
+        config_path = package_dir / "pet_config.json"
+        if not config_path.is_file():
+            raise ValueError("资源包配置文件不存在")
+
+        all_meta = [
+            dict(item)
+            for item in record.get("resource_frame_meta", [])
+            if isinstance(item, dict)
+        ]
+        role_meta = [item for item in all_meta if item.get("role") == role]
+        role_meta.sort(key=lambda item: int(item.get("index", 0)))
+        if after_index < 0 or after_index >= len(role_meta) - 1:
+            raise ValueError("只能在两帧之间插入新帧")
+        previous = role_meta[after_index]
+        previous_source = (job_dir / str(previous["source_path"])).resolve()
+        if job_dir.resolve() not in previous_source.parents or not previous_source.is_file():
+            raise ValueError("前一帧参考文件不存在")
+
+        prepared_paths = _prepared_preview_paths(job_id, record)
+        # Keep the immediately preceding frame even when the administrator
+        # limits the provider to a single reference image. With the normal
+        # two-reference setting, the identity anchor is sent first as well.
+        identity_reference = (
+            prepared_paths[0]
+            if int(getattr(settings, "ai_max_references", 2)) >= 2
+            else None
+        )
+        insertion_index = after_index + 1
+        token = uuid.uuid4().hex
+        raw_path = job_dir / "ai" / role / f"{role}_inserted_{token}.png"
+        await provider.generate_action_frame(
+            [previous_source],
+            role,
+            raw_path,
+            identity_reference=identity_reference,
+            frame_index=insertion_index,
+            frame_count=len(role_meta) + 1,
+            pose_consistency=getattr(settings, "pose_consistency", True),
+            continuity_reference=True,
+        )
+        cleaned_path = raw_path.with_name(f"{raw_path.stem}_cutout.png")
+        try:
+            replacement_source = await ai_cutout_frame(provider, raw_path, cleaned_path)
+        except Exception:
+            replacement_source = raw_path
+
+        inserted = {
+            "asset_path": "",
+            "source_path": _relative_job_path(job_dir, replacement_source),
+            "raw_source_path": _relative_job_path(job_dir, raw_path),
+            "role": role,
+            "index": insertion_index,
+            "frame_count": len(role_meta) + 1,
+            "inserted": True,
+        }
+        desired_role_items = role_meta[:insertion_index] + [inserted] + role_meta[insertion_index:]
+        remapped_role_meta, role_asset_paths = _rewrite_resource_role_assets(
+            job_dir,
+            package_dir,
+            role,
+            desired_role_items,
+        )
+        updated_meta = _replace_resource_role_metadata(
+            all_meta,
+            role,
+            remapped_role_meta,
+        )
+
+        config_data = json.loads(config_path.read_text(encoding="utf-8"))
+        config_assets = config_data.get("assets")
+        if not isinstance(config_assets, dict):
+            config_assets = {}
+        config_assets[role] = role_asset_paths
+        animation_config = config_data.get("animation")
+        if not isinstance(animation_config, dict):
+            animation_config = {}
+        animation_manifest = write_animation_bundle(
+            package_dir,
+            config_assets,
+            mode=animation_config.get("mode", "hybrid"),
+            fps=animation_config.get("fps", getattr(settings, "animation_fps", 12)),
+            frame_repeat=animation_config.get("frame_repeat", getattr(settings, "frame_repeat", 1)),
+        )
+        config_data["assets"] = config_assets
+        config_data["animation"] = animation_manifest
+        generation = config_data.get("generation")
+        if not isinstance(generation, dict):
+            generation = {}
+        frame_counts = generation.get("frame_counts")
+        if not isinstance(frame_counts, dict):
+            frame_counts = {}
+        frame_counts[role] = len(remapped_role_meta)
+        generation["frame_counts"] = frame_counts
+        generation["inserted_frame_count"] = int(generation.get("inserted_frame_count", 0)) + 1
+        config_data["generation"] = generation
+        config_path.write_text(
+            json.dumps(config_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        zip_path = Path(record["package_path"])
+        _rebuild_package_archive(package_dir, zip_path)
+        resource_preview_paths = [
+            str(item["asset_path"])
+            for item in updated_meta
+            if item.get("asset_path")
+        ]
+        revision = int(record.get("resource_preview_revision", 0)) + 1
+        store.update(
+            job_id,
+            status="ready",
+            progress=100,
+            message=f"已在 {role}_{after_index}.png 后插入一帧，资源包已更新",
+            resource_preview_paths=resource_preview_paths,
+            resource_frame_meta=updated_meta,
+            resource_preview_revision=revision,
+            frame_repeat=animation_manifest.get("frame_repeat", 1),
+            error="",
+        )
+    except Exception as error:
+        store.update(
+            job_id,
+            status="ready",
+            progress=100,
+            message=f"插入动作帧失败，已保留当前资源：{str(error)[-2000:]}",
+            error=str(error)[-4000:],
+        )
+
+
 async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: bool) -> None:
     store.update(job_id, status="processing", progress=5, message="正在准备照片")
 
@@ -643,6 +1085,7 @@ async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: 
             ai_frame_total=ai_frame_total,
             ai_error_count=result["ai_error_count"],
             animation_mode=result.get("animation_mode", settings.animation_mode),
+            frame_repeat=result.get("frame_repeat", settings.frame_repeat),
             resource_preview_paths=result.get("resource_preview_paths", []),
             resource_frame_meta=result.get("resource_frame_meta", []),
         )

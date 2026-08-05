@@ -46,6 +46,7 @@ class Settings:
     pose_consistency: bool = True
     animation_mode: str = "hybrid"
     animation_fps: int = 12
+    frame_repeat: int = 1
     walk_frame_count: int = 16
     sleep_frame_count: int = 12
     animation_defaults_version: int = 2
@@ -79,6 +80,7 @@ class Settings:
             pose_consistency=_env_bool("POSE_CONSISTENCY", True),
             animation_mode=_animation_mode(os.getenv("ANIMATION_MODE", "hybrid")),
             animation_fps=max(1, min(60, _env_int("ANIMATION_FPS", 12))),
+            frame_repeat=max(1, min(4, _env_int("ANIMATION_FRAME_REPEAT", 1))),
             walk_frame_count=max(1, min(24, _env_int("WALK_FRAME_COUNT", 16))),
             sleep_frame_count=max(1, min(24, _env_int("SLEEP_FRAME_COUNT", 12))),
         )
@@ -132,6 +134,8 @@ class Settings:
             self.animation_mode = _animation_mode(values["animation_mode"])
         if isinstance(values.get("animation_fps"), int):
             self.animation_fps = max(1, min(60, values["animation_fps"]))
+        if isinstance(values.get("frame_repeat"), int):
+            self.frame_repeat = max(1, min(4, values["frame_repeat"]))
         if isinstance(values.get("walk_frame_count"), int):
             self.walk_frame_count = max(1, min(24, values["walk_frame_count"]))
         if isinstance(values.get("sleep_frame_count"), int):
@@ -149,6 +153,7 @@ class Settings:
             "pose_consistency": self.pose_consistency,
             "animation_mode": self.animation_mode,
             "animation_fps": self.animation_fps,
+            "frame_repeat": self.frame_repeat,
             "walk_frame_count": self.walk_frame_count,
             "sleep_frame_count": self.sleep_frame_count,
             "animation_defaults_version": self.animation_defaults_version,
@@ -208,6 +213,8 @@ class Settings:
             self.animation_mode = _animation_mode(values["animation_mode"])
         if values.get("animation_fps") is not None:
             self.animation_fps = max(1, min(60, int(values["animation_fps"])))
+        if values.get("frame_repeat") is not None:
+            self.frame_repeat = max(1, min(4, int(values["frame_repeat"])))
         if values.get("walk_frame_count") is not None:
             self.walk_frame_count = max(1, min(24, int(values["walk_frame_count"])))
         if values.get("sleep_frame_count") is not None:
@@ -232,6 +239,7 @@ class Settings:
             "pose_consistency": self.pose_consistency,
             "animation_mode": self.animation_mode,
             "animation_fps": self.animation_fps,
+            "frame_repeat": self.frame_repeat,
             "walk_frame_count": self.walk_frame_count,
             "sleep_frame_count": self.sleep_frame_count,
         }

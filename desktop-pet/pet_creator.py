@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from pet_assets import normalize_pet_image
-from pet_animation import normalize_animation_mode, write_animation_bundle
+from pet_animation import normalize_animation_mode, normalize_frame_repeat, write_animation_bundle
 from pet_common import IMAGE_EXTENSIONS, ROLE_LABELS, ROLES, assign_roles, safe_filename, unique_directory
 
 
@@ -42,6 +42,7 @@ def create_package(
     output_parent: Path,
     use_simple_background: bool,
     animation_mode: str = "hybrid",
+    frame_repeat: int = 1,
 ) -> Path:
     """Create a self-contained, previewable pet package."""
 
@@ -72,6 +73,7 @@ def create_package(
         config_assets,
         mode=normalize_animation_mode(animation_mode),
         fps=10,
+        frame_repeat=normalize_frame_repeat(frame_repeat),
     )
 
     config = {
@@ -179,6 +181,7 @@ class CreatorApp(tk.Tk):
         self.output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
         self.use_simple_background_var = tk.BooleanVar(value=False)
         self.animation_mode_var = tk.StringVar(value="hybrid")
+        self.frame_repeat_var = tk.StringVar(value="1")
         self.status_var = tk.StringVar(value="请选择 1-8 张照片。第一张作为待机动作。")
         self.last_package_dir: Optional[Path] = None
         self._busy = False
@@ -249,6 +252,15 @@ class CreatorApp(tk.Tk):
             animation_options,
             text="hybrid 同时保存逐帧 PNG 与 2D 骨骼清单",
         ).pack(side="left", padx=(10, 0))
+        ttk.Label(animation_options, text="每帧保持").pack(side="left", padx=(16, 0))
+        ttk.Spinbox(
+            animation_options,
+            from_=1,
+            to=4,
+            textvariable=self.frame_repeat_var,
+            width=4,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(animation_options, text="次").pack(side="left", padx=(4, 0))
 
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(16, 0))
@@ -332,11 +344,12 @@ class CreatorApp(tk.Tk):
             Path(self.output_var.get()).expanduser(),
             self.use_simple_background_var.get(),
             self.animation_mode_var.get(),
+            normalize_frame_repeat(self.frame_repeat_var.get()),
         )
         threading.Thread(target=self._generate_worker, args=(arguments,), daemon=True).start()
 
     def _generate_worker(self, arguments):
-        photos, name, output, use_simple_background, animation_mode = arguments
+        photos, name, output, use_simple_background, animation_mode, frame_repeat = arguments
         try:
             package_dir = create_package(
                 photos,
@@ -344,6 +357,7 @@ class CreatorApp(tk.Tk):
                 output,
                 use_simple_background,
                 animation_mode,
+                frame_repeat,
             )
             self.after(0, lambda: self._generation_done(package_dir))
         except Exception as error:

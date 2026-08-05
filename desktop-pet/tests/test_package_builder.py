@@ -73,6 +73,7 @@ class PackageBuilderTests(unittest.IsolatedAsyncioTestCase):
                 ai_frame_count=1,
                 animation_mode="hybrid",
                 animation_fps=12,
+                frame_repeat=2,
                 pose_consistency=True,
                 frame_count_for_role=lambda _role: 1,
             )
@@ -89,6 +90,13 @@ class PackageBuilderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(provider.cutout_calls), 4)
             self.assertTrue(all(path.name.endswith("_cutout.png") for _, path in provider.cutout_calls))
             self.assertTrue(Path(result["zip_path"]).is_file())
+            self.assertEqual(result["frame_repeat"], 2)
+            self.assertEqual(
+                result["package_dir"].joinpath("animation.json").read_text(encoding="utf-8").count(
+                    '"frame_repeat": 2'
+                ),
+                5,
+            )
             self.assertTrue(all("raw_source_path" in item for item in result["resource_frame_meta"]))
 
 

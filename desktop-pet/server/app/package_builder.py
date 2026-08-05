@@ -154,11 +154,13 @@ async def build_pet_package(
 
     animation_mode = getattr(settings, "animation_mode", "hybrid")
     animation_fps = getattr(settings, "animation_fps", 10)
+    frame_repeat = getattr(settings, "frame_repeat", 1)
     animation_manifest = write_animation_bundle(
         package_dir,
         config_assets,
         mode=animation_mode,
         fps=animation_fps,
+        frame_repeat=frame_repeat,
     )
 
     config = {
@@ -176,6 +178,7 @@ async def build_pet_package(
             "frame_counts": {role: len(config_assets.get(role, [])) for role in ROLES},
             "background_removal": "ai-prompt+simple-fallback",
             "pose_consistency": bool(getattr(settings, "pose_consistency", True)),
+            "frame_repeat": animation_manifest.get("frame_repeat", 1),
         },
     }
     (package_dir / "pet_config.json").write_text(
@@ -205,6 +208,7 @@ async def build_pet_package(
         "ai_frame_total": ai_frame_total,
         "ai_error_count": ai_error_count,
         "animation_mode": animation_manifest["mode"],
+        "frame_repeat": animation_manifest.get("frame_repeat", 1),
         "resource_preview_paths": resource_preview_paths,
         "resource_frame_meta": resource_frame_meta,
     }
