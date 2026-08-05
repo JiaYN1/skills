@@ -325,7 +325,10 @@ class PetWindow:
 
         self.root.update_idletasks()
         first_frame = self.frames["idle"][0]
-        width, height = first_frame.width(), first_frame.height()
+        # Frames are still Pillow images here; Pillow exposes width/height as
+        # integer properties. They become Tk PhotoImage objects below, where
+        # width()/height() are methods.
+        width, height = first_frame.width, first_frame.height
         self.canvas.configure(width=width, height=height)
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
