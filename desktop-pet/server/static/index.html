@@ -107,7 +107,29 @@
             宠物照片（最多 8 张）
             <input id="photos" name="photos" type="file" accept="image/*" multiple required />
           </label>
-          <p class="hint">第一张作为身份锚点；建议再上传侧面、站立和趴下等姿态，AI 会按姿态计划生成走动/睡觉循环并尽量保持毛色、比例和落地基线一致。</p>
+          <fieldset class="action-options">
+            <legend>本次生成的动作</legend>
+            <p class="hint">只对勾选的动作调用 AI；未勾选的动作使用照片/程序化动画兜底，不消耗 AI 动作帧额度。</p>
+            <div class="action-options-grid">
+              <label class="check">
+                <input name="selected_actions" type="checkbox" value="idle" checked />
+                待机
+              </label>
+              <label class="check">
+                <input name="selected_actions" type="checkbox" value="walk" checked />
+                走动
+              </label>
+              <label class="check">
+                <input name="selected_actions" type="checkbox" value="sleep" checked />
+                睡觉
+              </label>
+              <label class="check">
+                <input name="selected_actions" type="checkbox" value="react" checked />
+                点击反应
+              </label>
+            </div>
+          </fieldset>
+          <p class="hint">第一张作为身份锚点；建议再上传侧面、站立和趴下等姿态。上方勾选的动作会调用 AI 生成，其他动作使用照片动画兜底。</p>
 
           <p class="hint">第一步先由 AI 去除上传图片背景并预览；确认主体无误后，再生成动作资源。资源完成后可单独请求 Windows Worker 打包 exe。</p>
 

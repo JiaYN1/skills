@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 import unittest
@@ -14,8 +15,10 @@ class FakeFrameProvider:
 
     def __init__(self):
         self.cutout_calls = []
+        self.action_roles = []
 
     async def generate_action_frames(self, references, role, output_dir, **_kwargs):
+        self.action_roles.append(role)
         output_dir.mkdir(parents=True, exist_ok=True)
         target = output_dir / f"{role}_0.png"
         shutil.copy2(references[0], target)
@@ -98,6 +101,45 @@ class PackageBuilderTests(unittest.IsolatedAsyncioTestCase):
                 5,
             )
             self.assertTrue(all("raw_source_path" in item for item in result["resource_frame_meta"]))
+
+    async def test_only_selected_actions_call_ai_and_others_use_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "pet.png"
+            image = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+            image.putpixel((40, 40), (180, 80, 60, 255))
+            image.save(source)
+
+            settings = SimpleNamespace(
+                ai_frame_count=1,
+                animation_mode="hybrid",
+                animation_fps=12,
+                frame_repeat=1,
+                pose_consistency=True,
+                frame_count_for_role=lambda _role: 1,
+            )
+            provider = FakeFrameProvider()
+            result = await build_pet_package(
+                root / "job",
+                "Selected Pet",
+                [source],
+                provider,
+                settings,
+                lambda _value, _message: None,
+                selected_actions=["walk"],
+            )
+
+            self.assertEqual(provider.action_roles, ["walk"])
+            self.assertEqual(len(provider.cutout_calls), 1)
+            self.assertEqual(result["selected_actions"], ["walk"])
+            config = json.loads(
+                result["package_dir"].joinpath("pet_config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(config["generation"]["selected_actions"], ["walk"])
+            self.assertEqual(
+                config["generation"]["fallback_actions"],
+                ["idle", "sleep", "react"],
+            )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 
 ROLES = ("idle", "walk", "sleep", "react")
@@ -13,6 +13,24 @@ ROLE_LABELS = {
     "react": "点击反应",
 }
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+
+def normalize_selected_actions(values: Optional[Iterable[str]]) -> List[str]:
+    """Normalize a per-job action selection in the stable role order."""
+
+    if values is None:
+        return list(ROLES)
+    if isinstance(values, str):
+        values = values.split(",")
+
+    requested = {str(value).strip() for value in values if str(value).strip()}
+    unknown = sorted(requested.difference(ROLES))
+    if unknown:
+        raise ValueError(f"不支持的动作：{', '.join(unknown)}")
+    selected = [role for role in ROLES if role in requested]
+    if not selected:
+        raise ValueError("至少选择一个动作")
+    return selected
 
 
 def safe_filename(value: str, fallback: str = "my-pet") -> str:

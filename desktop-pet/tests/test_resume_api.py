@@ -49,15 +49,15 @@ class ResumeGenerationEndpointTests(unittest.TestCase):
         record = self._failed_job()
         captured = []
 
-        async def fake_run_generation(job_id, name, paths, build_exe):
-            captured.append((job_id, name, paths, build_exe))
+        async def fake_run_generation(job_id, name, paths, build_exe, selected_actions):
+            captured.append((job_id, name, paths, build_exe, selected_actions))
 
         original_runner = self.main._run_generation
         self.main._run_generation = fake_run_generation
         try:
             response = self.client.post(
                 f"/api/jobs/{record['id']}/resume",
-                json={"name": "继续生成的宠物"},
+                json={"name": "继续生成的宠物", "selected_actions": ["walk"]},
             )
         finally:
             self.main._run_generation = original_runner
@@ -65,12 +65,13 @@ class ResumeGenerationEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "processing")
         self.assertEqual(len(captured), 1)
-        job_id, name, paths, build_exe = captured[0]
+        job_id, name, paths, build_exe, selected_actions = captured[0]
         self.assertEqual(job_id, record["id"])
         self.assertEqual(name, "继续生成的宠物")
         self.assertEqual(paths[0].name, "reference_0.png")
         self.assertEqual(paths[0].parent.name, "prepared")
         self.assertFalse(build_exe)
+        self.assertEqual(selected_actions, ["walk"])
         self.assertEqual(self.main.store.read(record["id"])["resume_count"], 1)
 
     def test_resume_is_rejected_when_the_job_already_has_a_package(self) -> None:

@@ -7,7 +7,9 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from pet_common import ROLES
 
 
 JOB_ID_PATTERN = re.compile(r"^[a-f0-9]{16,64}$")
@@ -22,7 +24,13 @@ class JobStore:
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
-    def new_job(self, name: str, photo_count: int, build_exe: bool) -> Dict[str, Any]:
+    def new_job(
+        self,
+        name: str,
+        photo_count: int,
+        build_exe: bool,
+        selected_actions: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         job_id = uuid.uuid4().hex
         job_dir = self.job_dir(job_id)
         (job_dir / "input").mkdir(parents=True, exist_ok=False)
@@ -31,6 +39,7 @@ class JobStore:
             "name": name,
             "photo_count": photo_count,
             "build_exe": build_exe,
+            "selected_actions": list(selected_actions) if selected_actions is not None else list(ROLES),
             "status": "queued",
             "progress": 0,
             "message": "任务已创建",

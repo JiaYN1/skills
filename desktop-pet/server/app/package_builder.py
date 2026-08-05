@@ -5,7 +5,7 @@ import shutil
 import sys
 import zipfile
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pet_assets import has_usable_transparency, normalize_pet_image, normalize_pet_sequence
 from pet_animation import write_animation_bundle
-from pet_common import ROLES, assign_roles, safe_filename
+from pet_common import ROLES, assign_roles, normalize_selected_actions, safe_filename
 
 from .ai_provider import OpenAICompatibleImageProvider
 from .config import Settings
@@ -51,6 +51,7 @@ async def build_pet_package(
     provider: OpenAICompatibleImageProvider,
     settings: Settings,
     progress: ProgressCallback,
+    selected_actions: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
     package_dir = job_dir / "package"
     assets_dir = package_dir / "assets"
@@ -78,24 +79,29 @@ async def build_pet_package(
     resource_frame_meta: List[Dict[str, object]] = []
     ai_frame_total = 0
     ai_error_count = 0
+    selected_action_list = normalize_selected_actions(selected_actions)
+    selected_action_set = set(selected_action_list)
 
     for role_index, role in enumerate(ROLES):
         progress(10 + role_index * 18, f"正在生成{_role_label(role)}动作")
         generated: List[Path] = []
         role_frame_count = _frame_count_for(settings, role)
-        try:
-            generated = await provider.generate_action_frames(
-                role_inputs[role],
-                role,
-                ai_dir / role,
-                identity_reference=normalized_inputs[0],
-                frame_count=role_frame_count,
-                pose_consistency=getattr(settings, "pose_consistency", True),
-            )
-        except Exception as error:
-            # Keep the job usable if a provider is temporarily unavailable.
-            ai_error_count += 1
-            progress(10 + role_index * 18, f"AI 生成失败，{_role_label(role)}使用照片动画：{error}")
+        if role in selected_action_set:
+            try:
+                generated = await provider.generate_action_frames(
+                    role_inputs[role],
+                    role,
+                    ai_dir / role,
+                    identity_reference=normalized_inputs[0],
+                    frame_count=role_frame_count,
+                    pose_consistency=getattr(settings, "pose_consistency", True),
+                )
+            except Exception as error:
+                # Keep the job usable if a provider is temporarily unavailable.
+                ai_error_count += 1
+                progress(10 + role_index * 18, f"AI 生成失败，{_role_label(role)}使用照片动画：{error}")
+        else:
+            progress(10 + role_index * 18, f"未选择生成{_role_label(role)}，使用照片动画兜底")
 
         if generated:
             # Run every AI action frame through the same AI cutout workflow as
@@ -175,6 +181,8 @@ async def build_pet_package(
             "provider": "openai-compatible" if ai_frame_total else "photo-fallback",
             "ai_frame_count": ai_frame_total,
             "ai_error_count": ai_error_count,
+            "selected_actions": selected_action_list,
+            "fallback_actions": [role for role in ROLES if role not in selected_action_set],
             "frame_counts": {role: len(config_assets.get(role, [])) for role in ROLES},
             "background_removal": "ai-prompt+simple-fallback",
             "pose_consistency": bool(getattr(settings, "pose_consistency", True)),
@@ -211,6 +219,7 @@ async def build_pet_package(
         "frame_repeat": animation_manifest.get("frame_repeat", 1),
         "resource_preview_paths": resource_preview_paths,
         "resource_frame_meta": resource_frame_meta,
+        "selected_actions": selected_action_list,
     }
 
 

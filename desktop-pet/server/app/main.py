@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pet_assets import normalize_pet_image, normalize_pet_sequence  # noqa: E402
 from pet_animation import write_animation_bundle  # noqa: E402
-from pet_common import ROLES, assign_roles  # noqa: E402
+from pet_common import ROLES, assign_roles, normalize_selected_actions  # noqa: E402
 
 store = JobStore(settings.data_dir)
 provider = OpenAICompatibleImageProvider(settings)
@@ -55,6 +55,7 @@ class AISettingsUpdate(BaseModel):
 class GenerateFromPreviewRequest(BaseModel):
     name: Optional[str] = None
     build_exe: bool = False
+    selected_actions: Optional[List[str]] = None
 
 
 class RemoveResourceFramesRequest(BaseModel):
@@ -108,6 +109,7 @@ async def prepare_pet(
     background_tasks: BackgroundTasks,
     photos: List[UploadFile] = File(...),
     name: str = Form("我的宠物"),
+    selected_actions: Optional[List[str]] = Form(default=None),
 ) -> Dict[str, Any]:
     """Create a job whose first stage only removes photo backgrounds."""
 
@@ -115,7 +117,8 @@ async def prepare_pet(
         raise HTTPException(400, f"请上传 1-{settings.max_files} 张图片")
 
     safe_name = _safe_name(name)
-    record = store.new_job(safe_name, len(photos), False)
+    selected_actions = _normalize_requested_actions(selected_actions)
+    record = store.new_job(safe_name, len(photos), False, selected_actions)
     job_id = record["id"]
     try:
         saved_paths = await _save_uploaded_photos(job_id, photos)
@@ -139,12 +142,14 @@ async def generate_pet(
     photos: List[UploadFile] = File(...),
     name: str = Form("我的宠物"),
     build_exe: bool = Form(False),
+    selected_actions: Optional[List[str]] = Form(default=None),
 ) -> Dict[str, Any]:
     if not photos or len(photos) > settings.max_files:
         raise HTTPException(400, f"请上传 1-{settings.max_files} 张图片")
 
     safe_name = _safe_name(name)
-    record = store.new_job(safe_name, len(photos), build_exe)
+    selected_actions = _normalize_requested_actions(selected_actions)
+    record = store.new_job(safe_name, len(photos), build_exe, selected_actions)
     job_id = record["id"]
     try:
         saved_paths = await _save_uploaded_photos(job_id, photos)
@@ -152,7 +157,14 @@ async def generate_pet(
         shutil.rmtree(store.job_dir(job_id), ignore_errors=True)
         raise
 
-    background_tasks.add_task(_run_generation, job_id, safe_name, saved_paths, build_exe)
+    background_tasks.add_task(
+        _run_generation,
+        job_id,
+        safe_name,
+        saved_paths,
+        build_exe,
+        selected_actions,
+    )
     return _public_job(store.read(job_id))
 
 
@@ -178,17 +190,30 @@ def generate_from_preview(
         raise HTTPException(409, "去背景预览文件不存在，请重新上传")
 
     name = _safe_name(payload.name or record.get("name", "我的宠物"))
-    build_exe = bool(payload.build_exe)
+    selected_actions = _normalize_requested_actions(
+        payload.selected_actions
+        if payload.selected_actions is not None
+        else record.get("selected_actions")
+    )
+    build_exe = bool(payload.build_exe or record.get("build_exe", False))
     store.update(
         job_id,
         name=name,
         build_exe=build_exe,
+        selected_actions=selected_actions,
         status="processing",
         progress=5,
         message="已确认去背景预览，正在生成动作资源",
         error="",
     )
-    background_tasks.add_task(_run_generation, job_id, name, preview_paths, build_exe)
+    background_tasks.add_task(
+        _run_generation,
+        job_id,
+        name,
+        preview_paths,
+        build_exe,
+        selected_actions,
+    )
     return _public_job(store.read(job_id))
 
 
@@ -213,19 +238,32 @@ def resume_failed_generation(
         raise HTTPException(409, "去背景预览文件不存在，请重新上传")
 
     name = _safe_name(payload.name or record.get("name", "我的宠物"))
+    selected_actions = _normalize_requested_actions(
+        payload.selected_actions
+        if payload.selected_actions is not None
+        else record.get("selected_actions")
+    )
     build_exe = bool(payload.build_exe or record.get("build_exe", False))
     resume_count = int(record.get("resume_count", 0)) + 1
     store.update(
         job_id,
         name=name,
         build_exe=build_exe,
+        selected_actions=selected_actions,
         status="processing",
         progress=5,
         message="已复用去背景预览，正在继续生成动作资源",
         error="",
         resume_count=resume_count,
     )
-    background_tasks.add_task(_run_generation, job_id, name, preview_paths, build_exe)
+    background_tasks.add_task(
+        _run_generation,
+        job_id,
+        name,
+        preview_paths,
+        build_exe,
+        selected_actions,
+    )
     return _public_job(store.read(job_id))
 
 
@@ -1048,7 +1086,13 @@ async def _run_resource_frame_insertion(
         )
 
 
-async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: bool) -> None:
+async def _run_generation(
+    job_id: str,
+    name: str,
+    paths: List[Path],
+    build_exe: bool,
+    selected_actions: List[str],
+) -> None:
     store.update(job_id, status="processing", progress=5, message="正在准备照片")
 
     def progress(value: int, message: str) -> None:
@@ -1062,6 +1106,7 @@ async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: 
             provider,
             settings,
             progress,
+            selected_actions=selected_actions,
         )
         zip_path = Path(result["zip_path"])
         next_status = "ready_for_build" if build_exe and settings.build_mode == "worker" else "ready"
@@ -1086,6 +1131,7 @@ async def _run_generation(job_id: str, name: str, paths: List[Path], build_exe: 
             ai_error_count=result["ai_error_count"],
             animation_mode=result.get("animation_mode", settings.animation_mode),
             frame_repeat=result.get("frame_repeat", settings.frame_repeat),
+            selected_actions=result.get("selected_actions", selected_actions),
             resource_preview_paths=result.get("resource_preview_paths", []),
             resource_frame_meta=result.get("resource_frame_meta", []),
         )
@@ -1300,6 +1346,13 @@ def _safe_name(value: str) -> str:
     from pet_common import safe_filename
 
     return safe_filename(value[:80], "my-pet")
+
+
+def _normalize_requested_actions(values: Optional[List[str]]) -> List[str]:
+    try:
+        return normalize_selected_actions(values)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
 
 
 def _verify_worker(token: Optional[str]) -> None:

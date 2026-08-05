@@ -24,6 +24,20 @@ let currentJobId = null;
 let currentJob = null;
 let selectedResourceFrames = new Set();
 
+function selectedActions() {
+  return [...document.querySelectorAll('input[name="selected_actions"]')]
+    .filter((input) => input.checked)
+    .map((input) => input.value);
+}
+
+function applySelectedActions(values) {
+  if (!Array.isArray(values) || !values.length) return;
+  const selected = new Set(values);
+  document.querySelectorAll('input[name="selected_actions"]').forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+}
+
 function adminHeaders() {
   const token = adminTokenInput.value.trim();
   if (!token) throw new Error("请先输入 ADMIN_TOKEN");
@@ -236,6 +250,7 @@ aiSettingsForm.addEventListener("submit", async (event) => {
 
 function showProgress(job) {
   currentJob = job;
+  applySelectedActions(job.selected_actions);
   progress.classList.remove("hidden");
   statusText.textContent = job.status === "preview_ready" ? "等待确认预览" : (job.status || "processing");
   const percent = Math.max(0, Math.min(100, Number(job.progress || 0)));
@@ -342,7 +357,10 @@ resumeGenerationButton.addEventListener("click", async () => {
     const response = await fetch(currentJob.resume_url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: document.querySelector("#pet-name").value.trim() }),
+      body: JSON.stringify({
+        name: document.querySelector("#pet-name").value.trim(),
+        selected_actions: selectedActions(),
+      }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "继续生成动作资源失败");
@@ -373,6 +391,11 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const files = document.querySelector("#photos").files;
   if (!files.length) return;
+  const actions = selectedActions();
+  if (!actions.length) {
+    showError(new Error("至少选择一个动作"));
+    return;
+  }
   submitButton.disabled = true;
   buildExeButton.disabled = true;
   currentJobId = null;
@@ -390,6 +413,8 @@ form.addEventListener("submit", async (event) => {
   restartPreviewButton.disabled = true;
   const body = new FormData(form);
   body.delete("photos");
+  body.delete("selected_actions");
+  actions.forEach((action) => body.append("selected_actions", action));
   for (const file of files) body.append("photos", file);
   try {
     const response = await fetch("/api/pets/prepare", { method: "POST", body });
@@ -411,7 +436,10 @@ confirmPreviewButton.addEventListener("click", async () => {
     const response = await fetch(`/api/jobs/${currentJobId}/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: document.querySelector("#pet-name").value.trim() }),
+      body: JSON.stringify({
+        name: document.querySelector("#pet-name").value.trim(),
+        selected_actions: selectedActions(),
+      }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "生成动作资源失败");

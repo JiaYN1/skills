@@ -4,7 +4,7 @@
 
 1. 用户上传 1-8 张照片。
 2. 第一步调用 OpenAI-compatible 图像服务单独去除每张照片背景，浏览器展示透明主体预览。
-3. 用户确认预览后，第二步才生成待机、走动、睡觉和点击动作帧，并展示生成的 PNG 资源预览。
+3. 用户确认预览后，第二步才生成用户选择的待机、走动、睡觉和点击动作帧，并展示生成的 PNG 资源预览。
 4. 服务端生成资源包 zip。
 5. 如果请求 exe，Windows Worker 从服务端领取资源包，在 Windows 上用 PyInstaller 打包并回传 exe。
 
@@ -31,7 +31,7 @@ docker compose up -d --build
 
 浏览器先调用 `POST /api/pets/prepare`。任务进入 `preview_processing`，AI 去背景完成后变为 `preview_ready`；`GET /api/jobs/{id}` 会返回 `preview_images`，图片通过受限的 `/api/jobs/{id}/preview/...` 地址预览。
 
-用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。如果动作资源阶段失败但去背景预览仍然存在，可调用 `POST /api/jobs/{id}/resume` 复用已有预览继续生成，不会重复去背景。
+用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。上传照片时可以选择本次要调用 AI 的动作；未选择的动作使用照片/程序化动画兜底，不消耗 AI 动作帧额度。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。如果动作资源阶段失败但去背景预览仍然存在，可调用 `POST /api/jobs/{id}/resume` 复用已有预览继续生成，不会重复去背景。
 
 资源包生成成功但 Windows Worker 打包 exe 失败时，任务会保留 zip；页面会显示“重试打包 Windows exe”，再次提交 `POST /api/jobs/{id}/build-exe` 即可重试。
 

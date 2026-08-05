@@ -24,6 +24,10 @@ input[type="file"], input[type="text"], input[type="url"], input[type="password"
 .warning-check { color: #a94f3d; }
 .settings-form { margin-top: 20px; }
 .settings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.action-options { margin: 18px 0; padding: 14px 16px 2px; border: 1px solid #e9e0d7; border-radius: 14px; }
+.action-options legend { padding: 0 6px; font-weight: 800; }
+.action-options-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.action-options-grid .check { margin-bottom: 12px; }
 .settings-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .settings-status { color: #6d806c; font-size: 13px; }
 .settings-status.error { color: #b44e3e; }
@@ -61,6 +65,7 @@ button:disabled { opacity: .55; cursor: wait; }
   .shell { padding-top: 36px; }
   .card { padding: 20px; }
   .settings-grid { grid-template-columns: 1fr; gap: 0; }
+  .action-options-grid { grid-template-columns: repeat(2, 1fr); }
   .preview-heading { align-items: start; flex-direction: column; gap: 6px; }
   .preview-status { text-align: left; }
   .resource-preview-toolbar { align-items: flex-start; flex-direction: column; }

@@ -1,7 +1,13 @@
 import unittest
 from pathlib import Path
 
-from pet_common import assign_roles, safe_filename, unique_directory
+from pet_common import (
+    ROLES,
+    assign_roles,
+    normalize_selected_actions,
+    safe_filename,
+    unique_directory,
+)
 
 
 class PetCommonTests(unittest.TestCase):
@@ -33,6 +39,22 @@ class PetCommonTests(unittest.TestCase):
             self.assertEqual(result.name, "pet_2")
 
 
+class SelectedActionTests(unittest.TestCase):
+    def test_missing_selection_defaults_to_all_actions(self):
+        self.assertEqual(normalize_selected_actions(None), list(ROLES))
+
+    def test_selection_uses_stable_role_order_and_removes_duplicates(self):
+        self.assertEqual(
+            normalize_selected_actions(["react", "walk", "walk"]),
+            ["walk", "react"],
+        )
+
+    def test_empty_or_unknown_selection_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "至少选择一个动作"):
+            normalize_selected_actions([])
+        with self.assertRaisesRegex(ValueError, "不支持的动作"):
+            normalize_selected_actions(["jump"])
+
+
 if __name__ == "__main__":
     unittest.main()
-
