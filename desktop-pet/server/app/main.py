@@ -1131,6 +1131,7 @@ async def _run_generation(
             ai_error_count=result["ai_error_count"],
             animation_mode=result.get("animation_mode", settings.animation_mode),
             frame_repeat=result.get("frame_repeat", settings.frame_repeat),
+            animation_fps=result.get("animation_fps", settings.animation_fps),
             selected_actions=result.get("selected_actions", selected_actions),
             resource_preview_paths=result.get("resource_preview_paths", []),
             resource_frame_meta=result.get("resource_frame_meta", []),

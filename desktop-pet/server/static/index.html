@@ -168,7 +168,25 @@
               <span class="eyebrow">STEP 2</span>
               <h2>动作资源预览</h2>
             </div>
-            <span class="preview-status">生成的 PNG 帧，可删除动作突变帧</span>
+            <span class="preview-status">可播放动作并删除或插入突变帧</span>
+          </div>
+          <div id="action-player" class="action-player hidden">
+            <div class="action-player-toolbar">
+              <label>
+                预览动作
+                <select id="action-player-role"></select>
+              </label>
+              <span id="action-player-frame" class="hint">第 0 / 0 帧</span>
+            </div>
+            <div class="action-player-stage">
+              <img id="action-player-image" alt="动作播放预览" />
+            </div>
+            <div class="form-actions action-player-controls">
+              <button id="action-player-prev" class="secondary" type="button">上一帧</button>
+              <button id="action-player-toggle" type="button">播放</button>
+              <button id="action-player-next" class="secondary" type="button">下一帧</button>
+            </div>
+            <p id="action-player-hint" class="hint"></p>
           </div>
           <div class="resource-preview-toolbar">
             <span id="resource-selection-text" class="hint">勾选突变帧删除，或点击帧下方按钮补帧</span>

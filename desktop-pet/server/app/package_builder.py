@@ -217,6 +217,7 @@ async def build_pet_package(
         "ai_error_count": ai_error_count,
         "animation_mode": animation_manifest["mode"],
         "frame_repeat": animation_manifest.get("frame_repeat", 1),
+        "animation_fps": animation_manifest.get("fps", animation_fps),
         "resource_preview_paths": resource_preview_paths,
         "resource_frame_meta": resource_frame_meta,
         "selected_actions": selected_action_list,

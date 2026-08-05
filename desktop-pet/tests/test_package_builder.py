@@ -94,6 +94,7 @@ class PackageBuilderTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(path.name.endswith("_cutout.png") for _, path in provider.cutout_calls))
             self.assertTrue(Path(result["zip_path"]).is_file())
             self.assertEqual(result["frame_repeat"], 2)
+            self.assertEqual(result["animation_fps"], 12)
             self.assertEqual(
                 result["package_dir"].joinpath("animation.json").read_text(encoding="utf-8").count(
                     '"frame_repeat": 2'

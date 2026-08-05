@@ -14,6 +14,14 @@ const confirmPreviewButton = document.querySelector("#confirm-preview");
 const restartPreviewButton = document.querySelector("#restart-preview");
 const resourcePreviewSection = document.querySelector("#resource-preview-section");
 const resourcePreviewGrid = document.querySelector("#resource-preview-grid");
+const actionPlayer = document.querySelector("#action-player");
+const actionPlayerRoleSelect = document.querySelector("#action-player-role");
+const actionPlayerImage = document.querySelector("#action-player-image");
+const actionPlayerFrameText = document.querySelector("#action-player-frame");
+const actionPlayerHint = document.querySelector("#action-player-hint");
+const actionPlayerPrevious = document.querySelector("#action-player-prev");
+const actionPlayerToggle = document.querySelector("#action-player-toggle");
+const actionPlayerNext = document.querySelector("#action-player-next");
 const resourceSelectionText = document.querySelector("#resource-selection-text");
 const removeSelectedFramesButton = document.querySelector("#remove-selected-frames");
 const adminTokenInput = document.querySelector("#admin-token");
@@ -23,6 +31,17 @@ const aiSettingsStatus = document.querySelector("#ai-settings-status");
 let currentJobId = null;
 let currentJob = null;
 let selectedResourceFrames = new Set();
+const ACTION_LABELS = {
+  idle: "待机",
+  walk: "走动",
+  sleep: "睡觉",
+  react: "点击反应",
+};
+let actionPlayerSequences = {};
+let actionPlayerRole = "";
+let actionPlayerIndex = 0;
+let actionPlayerTimer = null;
+let actionPlayerPlaying = false;
 
 function selectedActions() {
   return [...document.querySelectorAll('input[name="selected_actions"]')]
@@ -36,6 +55,105 @@ function applySelectedActions(values) {
   document.querySelectorAll('input[name="selected_actions"]').forEach((input) => {
     input.checked = selected.has(input.value);
   });
+}
+
+function stopActionPlayer() {
+  actionPlayerPlaying = false;
+  if (actionPlayerTimer !== null) {
+    window.clearTimeout(actionPlayerTimer);
+    actionPlayerTimer = null;
+  }
+  actionPlayerToggle.textContent = "播放";
+}
+
+function resetActionPlayer() {
+  stopActionPlayer();
+  actionPlayerSequences = {};
+  actionPlayerRole = "";
+  actionPlayerIndex = 0;
+  actionPlayerRoleSelect.replaceChildren();
+  actionPlayerImage.removeAttribute("src");
+  actionPlayerFrameText.textContent = "第 0 / 0 帧";
+  actionPlayerHint.textContent = "";
+  actionPlayer.classList.add("hidden");
+}
+
+function currentActionPlayerFrames() {
+  return actionPlayerSequences[actionPlayerRole] || [];
+}
+
+function renderActionPlayerFrame() {
+  const frames = currentActionPlayerFrames();
+  if (!frames.length) {
+    resetActionPlayer();
+    return;
+  }
+  actionPlayerIndex = Math.max(0, Math.min(actionPlayerIndex, frames.length - 1));
+  const item = frames[actionPlayerIndex];
+  actionPlayerImage.src = item.url;
+  actionPlayerImage.alt = item.name || `${ACTION_LABELS[actionPlayerRole] || actionPlayerRole}预览`;
+  actionPlayerFrameText.textContent = `${ACTION_LABELS[actionPlayerRole] || actionPlayerRole} · 第 ${actionPlayerIndex + 1} / ${frames.length} 帧`;
+  const fps = Math.max(1, Math.min(60, Number(currentJob?.animation_fps || 12)));
+  const repeat = Math.max(1, Math.min(4, Number(currentJob?.frame_repeat || 1)));
+  actionPlayerHint.textContent = `${fps} FPS · 每帧保持 ${repeat} 次；播放时可观察动作是否有突变。`;
+  actionPlayer.classList.remove("hidden");
+}
+
+function scheduleActionPlayer() {
+  if (!actionPlayerPlaying || !currentActionPlayerFrames().length) return;
+  const fps = Math.max(1, Math.min(60, Number(currentJob?.animation_fps || 12)));
+  const repeat = Math.max(1, Math.min(4, Number(currentJob?.frame_repeat || 1)));
+  actionPlayerTimer = window.setTimeout(() => {
+    actionPlayerTimer = null;
+    if (!actionPlayerPlaying) return;
+    const frames = currentActionPlayerFrames();
+    if (frames.length) {
+      actionPlayerIndex = (actionPlayerIndex + 1) % frames.length;
+      renderActionPlayerFrame();
+    }
+    scheduleActionPlayer();
+  }, (1000 / fps) * repeat);
+}
+
+function updateActionPlayer(items, job) {
+  const grouped = {};
+  if (Array.isArray(items)) {
+    for (const item of items) {
+      if (item.role == null || item.index == null || !item.url) continue;
+      if (!grouped[item.role]) grouped[item.role] = [];
+      grouped[item.role].push(item);
+    }
+  }
+  const roles = ["idle", "walk", "sleep", "react"].filter((role) => grouped[role]?.length);
+  if (!roles.length) {
+    resetActionPlayer();
+    return;
+  }
+  for (const role of roles) {
+    grouped[role].sort((left, right) => Number(left.index) - Number(right.index));
+  }
+  const previousRole = actionPlayerRole;
+  actionPlayerSequences = grouped;
+  actionPlayerRole = roles.includes(previousRole) ? previousRole : roles[0];
+  if (actionPlayerRole !== previousRole) actionPlayerIndex = 0;
+  else actionPlayerIndex = Math.min(actionPlayerIndex, grouped[actionPlayerRole].length - 1);
+  currentJob = job;
+
+  const optionSignature = [...actionPlayerRoleSelect.options].map((option) => option.value).join(",");
+  if (optionSignature !== roles.join(",")) {
+    actionPlayerRoleSelect.replaceChildren(
+      ...roles.map((role) => new Option(ACTION_LABELS[role] || role, role)),
+    );
+  }
+  actionPlayerRoleSelect.value = actionPlayerRole;
+  renderActionPlayerFrame();
+}
+
+function moveActionPlayerFrame(offset) {
+  const frames = currentActionPlayerFrames();
+  if (!frames.length) return;
+  actionPlayerIndex = (actionPlayerIndex + offset + frames.length) % frames.length;
+  renderActionPlayerFrame();
 }
 
 function adminHeaders() {
@@ -283,6 +401,7 @@ function showProgress(job) {
     job.status === "ready" && job.artifact_kind === "zip",
     true,
   );
+  updateActionPlayer(job.resource_preview_images, job);
   confirmPreviewButton.disabled = job.status !== "preview_ready";
   restartPreviewButton.disabled = job.status !== "preview_ready";
   buildExeButton.disabled = !canBuildExe;
@@ -320,6 +439,31 @@ async function removeSelectedFrames() {
 }
 
 removeSelectedFramesButton.addEventListener("click", removeSelectedFrames);
+
+actionPlayerRoleSelect.addEventListener("change", () => {
+  const wasPlaying = actionPlayerPlaying;
+  if (actionPlayerTimer !== null) {
+    window.clearTimeout(actionPlayerTimer);
+    actionPlayerTimer = null;
+  }
+  actionPlayerRole = actionPlayerRoleSelect.value;
+  actionPlayerIndex = 0;
+  renderActionPlayerFrame();
+  if (wasPlaying) scheduleActionPlayer();
+});
+
+actionPlayerPrevious.addEventListener("click", () => moveActionPlayerFrame(-1));
+actionPlayerNext.addEventListener("click", () => moveActionPlayerFrame(1));
+actionPlayerToggle.addEventListener("click", () => {
+  if (!currentActionPlayerFrames().length) return;
+  if (actionPlayerPlaying) {
+    stopActionPlayer();
+    return;
+  }
+  actionPlayerPlaying = true;
+  actionPlayerToggle.textContent = "暂停";
+  scheduleActionPlayer();
+});
 
 function canQueueExeBuild(job) {
   return Boolean(
@@ -403,6 +547,7 @@ form.addEventListener("submit", async (event) => {
   download.classList.add("hidden");
   previewSection.classList.add("hidden");
   resourcePreviewSection.classList.add("hidden");
+  resetActionPlayer();
   resumeGenerationButton.classList.add("hidden");
   resumeGenerationButton.disabled = true;
   previewGrid.replaceChildren();
@@ -456,6 +601,7 @@ restartPreviewButton.addEventListener("click", () => {
   document.querySelector("#photos").value = "";
   previewSection.classList.add("hidden");
   resourcePreviewSection.classList.add("hidden");
+  resetActionPlayer();
   previewGrid.replaceChildren();
   resourcePreviewGrid.replaceChildren();
   selectedResourceFrames.clear();
