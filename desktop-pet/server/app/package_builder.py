@@ -15,11 +15,17 @@ from pet_assets import has_usable_transparency, normalize_pet_image, normalize_p
 from pet_animation import write_animation_bundle
 from pet_common import ROLES, assign_roles, normalize_selected_actions, safe_filename
 
-from .ai_provider import OpenAICompatibleImageProvider
+from .ai_provider import GenerationCancelled, OpenAICompatibleImageProvider
 from .config import Settings
 
 
 ProgressCallback = Callable[[int, str], None]
+CheckpointCallback = Callable[[Dict[str, object]], None]
+CancelCheck = Callable[[], bool]
+
+
+class BuildCancelled(GenerationCancelled):
+    """Raised when a job's owner requests a cooperative stop."""
 
 
 ROLE_ANCHORS = {
@@ -52,6 +58,9 @@ async def build_pet_package(
     settings: Settings,
     progress: ProgressCallback,
     selected_actions: Optional[Sequence[str]] = None,
+    should_cancel: Optional[CancelCheck] = None,
+    checkpoint: Optional[CheckpointCallback] = None,
+    resume_checkpoint: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     package_dir = job_dir / "package"
     assets_dir = package_dir / "assets"
@@ -63,6 +72,7 @@ async def build_pet_package(
 
     normalized_inputs: List[Path] = []
     for index, source in enumerate(input_paths):
+        _check_cancelled(should_cancel)
         target = references_dir / f"reference_{index}.png"
         normalize_pet_image(
             source,
@@ -81,11 +91,28 @@ async def build_pet_package(
     ai_error_count = 0
     selected_action_list = normalize_selected_actions(selected_actions)
     selected_action_set = set(selected_action_list)
+    stored_roles = (resume_checkpoint or {}).get("completed_roles", [])
+    completed_roles_state = list(stored_roles) if isinstance(stored_roles, list) else []
 
     for role_index, role in enumerate(ROLES):
+        _check_cancelled(should_cancel)
         progress(10 + role_index * 18, f"正在生成{_role_label(role)}动作")
         generated: List[Path] = []
         role_frame_count = _frame_count_for(settings, role)
+        role_resume = _role_resume_checkpoint(resume_checkpoint, role)
+        start_index = int(role_resume.get("completed_frame_count", 0))
+        if start_index < 0 or start_index >= role_frame_count:
+            start_index = 0
+        _write_checkpoint(
+            checkpoint,
+            {
+                "stage": "actions",
+                "role": role,
+                "role_index": role_index,
+                "completed_frame_count": start_index,
+                "completed_roles": list(completed_roles_state),
+            },
+        )
         if role in selected_action_set:
             try:
                 generated = await provider.generate_action_frames(
@@ -95,8 +122,22 @@ async def build_pet_package(
                     identity_reference=normalized_inputs[0],
                     frame_count=role_frame_count,
                     pose_consistency=getattr(settings, "pose_consistency", True),
+                    start_index=start_index,
+                    should_cancel=should_cancel,
+                    on_frame=lambda frame_index, current_role=role: _write_checkpoint(
+                        checkpoint,
+                        {
+                            "stage": "actions",
+                            "role": current_role,
+                            "role_index": role_index,
+                            "completed_frame_count": int(frame_index) + 1,
+                            "completed_roles": list(completed_roles_state),
+                        },
+                    ),
                 )
             except Exception as error:
+                if isinstance(error, GenerationCancelled):
+                    raise BuildCancelled(str(error))
                 # Keep the job usable if a provider is temporarily unavailable.
                 ai_error_count += 1
                 progress(10 + role_index * 18, f"AI 生成失败，{_role_label(role)}使用照片动画：{error}")
@@ -110,16 +151,36 @@ async def build_pet_package(
             # matte even when the prompt requests alpha.
             cleaned_sources: List[Path] = []
             for frame_index, source in enumerate(generated):
+                _check_cancelled(should_cancel)
                 cleaned_path = ai_dir / role / f"{role}_{frame_index}_cutout.png"
-                try:
-                    cleaned_sources.append(await ai_cutout_frame(provider, source, cleaned_path))
-                except Exception as error:
-                    ai_error_count += 1
-                    progress(
-                        10 + role_index * 18,
-                        f"{_role_label(role)}第 {frame_index + 1} 帧去背景失败，保留原帧：{error}",
-                    )
-                    cleaned_sources.append(source)
+                if (
+                    frame_index < start_index
+                    and cleaned_path.exists()
+                    and has_usable_transparency(cleaned_path)
+                ):
+                    cleaned_sources.append(cleaned_path)
+                else:
+                    try:
+                        cleaned_sources.append(await ai_cutout_frame(provider, source, cleaned_path))
+                    except GenerationCancelled:
+                        raise BuildCancelled("任务已停止")
+                    except Exception as error:
+                        ai_error_count += 1
+                        progress(
+                            10 + role_index * 18,
+                            f"{_role_label(role)}第 {frame_index + 1} 帧去背景失败，保留原帧：{error}",
+                        )
+                        cleaned_sources.append(source)
+                _write_checkpoint(
+                    checkpoint,
+                    {
+                        "stage": "actions",
+                        "role": role,
+                        "role_index": role_index,
+                        "completed_frame_count": frame_index + 1,
+                        "completed_roles": list(completed_roles_state),
+                    },
+                )
             sources = cleaned_sources
         else:
             sources = role_inputs[role] or [normalized_inputs[0]]
@@ -138,6 +199,18 @@ async def build_pet_package(
             background_mode="simple",
             anchor=ROLE_ANCHORS.get(role, "center"),
             subject_scale=0.96,
+        )
+        if role not in completed_roles_state:
+            completed_roles_state.append(role)
+        _write_checkpoint(
+            checkpoint,
+            {
+                "stage": "actions",
+                "role": role,
+                "role_index": role_index,
+                "completed_frame_count": len(selected_sources),
+                "completed_roles": list(completed_roles_state),
+            },
         )
         config_assets[role] = [
             f"assets/{destination.name}" for destination in destinations
@@ -161,6 +234,15 @@ async def build_pet_package(
     animation_mode = getattr(settings, "animation_mode", "hybrid")
     animation_fps = getattr(settings, "animation_fps", 10)
     frame_repeat = getattr(settings, "frame_repeat", 1)
+    _check_cancelled(should_cancel)
+    _write_checkpoint(
+        checkpoint,
+        {
+            "stage": "packaging",
+            "completed_roles": list(ROLES),
+            "completed_frame_count": 0,
+        },
+    )
     animation_manifest = write_animation_bundle(
         package_dir,
         config_assets,
@@ -205,6 +287,7 @@ async def build_pet_package(
     zip_path = job_dir / f"{safe_filename(name, 'my-pet')}.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in package_dir.rglob("*"):
+            _check_cancelled(should_cancel)
             if path.is_file():
                 archive.write(path, path.relative_to(package_dir).as_posix())
 
@@ -222,6 +305,28 @@ async def build_pet_package(
         "resource_frame_meta": resource_frame_meta,
         "selected_actions": selected_action_list,
     }
+
+
+def _check_cancelled(should_cancel: Optional[CancelCheck]) -> None:
+    if should_cancel is not None and should_cancel():
+        raise BuildCancelled("任务已停止")
+
+
+def _write_checkpoint(
+    callback: Optional[CheckpointCallback],
+    value: Dict[str, object],
+) -> None:
+    if callback is not None:
+        callback(value)
+
+
+def _role_resume_checkpoint(
+    checkpoint: Optional[Dict[str, object]],
+    role: str,
+) -> Dict[str, object]:
+    if not isinstance(checkpoint, dict) or checkpoint.get("role") != role:
+        return {}
+    return checkpoint
 
 
 def _role_label(role: str) -> str:

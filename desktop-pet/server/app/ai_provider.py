@@ -4,6 +4,7 @@ import base64
 import mimetypes
 import shutil
 import sys
+from typing import Callable
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,10 @@ class ImageGenerationError(RuntimeError):
     pass
 
 
+class GenerationCancelled(RuntimeError):
+    """Cooperative cancellation from a long-running image generation job."""
+
+
 class OpenAICompatibleImageProvider:
     """Image edit/generation adapter for OpenAI-compatible services.
 
@@ -53,6 +58,9 @@ class OpenAICompatibleImageProvider:
         identity_reference: Optional[Path] = None,
         frame_count: Optional[int] = None,
         pose_consistency: Optional[bool] = None,
+        start_index: int = 0,
+        should_cancel: Optional[Callable[[], bool]] = None,
+        on_frame: Optional[Callable[[int], None]] = None,
     ) -> List[Path]:
         if not self.available:
             return []
@@ -79,7 +87,15 @@ class OpenAICompatibleImageProvider:
         # returned image. Avoid n=count because compatible gateways often
         # reject it or turn the response into a contact sheet.
         for index in range(count):
+            if should_cancel is not None and should_cancel():
+                raise GenerationCancelled("任务已停止")
             target = output_dir / f"{role}_{index}.png"
+            if index < max(0, int(start_index)) and target.exists():
+                output_paths.append(target)
+                continuity_reference = target
+                if on_frame is not None:
+                    on_frame(index)
+                continue
             request_references = [continuity_reference] if continuity_reference else reference_paths
             try:
                 await self.generate_action_frame(
@@ -94,6 +110,8 @@ class OpenAICompatibleImageProvider:
                 )
                 continuity_reference = target
             except Exception as error:
+                if should_cancel is not None and should_cancel():
+                    raise GenerationCancelled("任务已停止")
                 errors.append(f"{role}_{index}: {error}")
                 # Keep the cycle length stable when one provider request fails.
                 # Repeating the previous frame is less disruptive than dropping
@@ -105,6 +123,8 @@ class OpenAICompatibleImageProvider:
                 else:
                     continue
             output_paths.append(target)
+            if on_frame is not None:
+                on_frame(index)
 
         if not output_paths and errors:
             raise ImageGenerationError("动作帧生成失败：" + "；".join(errors[-3:]))

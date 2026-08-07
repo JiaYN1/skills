@@ -17,23 +17,30 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-打开 <http://localhost:8000>。
+打开 <http://localhost:8000>，先注册/登录账号。
 
 如果暂时不接 Windows Worker，可把 `.env` 中的 `BUILD_MODE` 改为 `archive`。这样用户仍然可以下载资源包 zip，但不会得到 exe。
 
-## 前端配置 AI
+## 账号、AI 配置与任务权限
 
-打开首页的“AI 配置（管理员）”面板，输入 `ADMIN_TOKEN` 后即可配置启用开关、API 地址、模型、API Key、基础动作帧数、走动/睡觉帧数、FPS、每帧保持次数、参考图数量、姿态一致性和输出格式。Key 会保存在 `/data/settings.json`，不会返回原文；普通上传用户不需要管理令牌。
+普通用户登录后可以在“AI 配置（当前用户）”面板保存自己的 API 地址、模型、Key 和动画参数；配置保存在 `/data/users/{user_id}/settings.json`，Key 只返回掩码。创建任务时会保存一份配置快照，因此任务运行期间修改账号配置不会改变正在执行的任务。
+
+管理员在页面填入 `ADMIN_TOKEN` 后，可以读取/修改管理员默认配置，并查看所有用户的任务列表和运行历史。管理员令牌只用于管理接口，普通用户不应共享。
 
 首次部署必须在 `.env` 中设置 `ADMIN_TOKEN`，不要使用公开的默认值。
 
+用户与 HttpOnly 会话分别保存在 `/data/users.json` 和 `/data/sessions.json`；生产环境应通过 HTTPS、反向代理和备份保护整个 `/data` 目录。
+如果页面通过 HTTPS 提供，把 `.env` 中的 `AUTH_COOKIE_SECURE` 设置为 `true`。
+
 ## 两阶段预览流程
 
-浏览器先调用 `POST /api/pets/prepare`。任务进入 `preview_processing`，AI 去背景完成后变为 `preview_ready`；`GET /api/jobs/{id}` 会返回 `preview_images`，图片通过受限的 `/api/jobs/{id}/preview/...` 地址预览。
+浏览器先调用 `POST /api/pets/prepare`。任务进入 `preview_processing`，AI 去背景完成后变为 `preview_ready`；`GET /api/jobs/{id}` 会返回 `preview_images`，图片通过受限的 `/api/jobs/{id}/preview/...` 地址预览。所有用户任务接口都会校验 owner，普通用户只能访问自己的任务。
 
 用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。上传照片时可以选择本次要调用 AI 的动作；未选择的动作使用照片/程序化动画兜底，不消耗 AI 动作帧额度。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。如果动作资源阶段失败但去背景预览仍然存在，可调用 `POST /api/jobs/{id}/resume` 复用已有预览继续生成，不会重复去背景。
 
 资源包生成成功但 Windows Worker 打包 exe 失败时，任务会保留 zip；页面会显示“重试打包 Windows exe”，再次提交 `POST /api/jobs/{id}/build-exe` 即可重试。
+
+`GET /api/jobs` 返回当前用户任务，管理员令牌返回全部任务；点击任务后可查看 `GET /api/jobs/{id}/events` 的阶段、进度和 checkpoint。运行中的任务可以 `POST /api/jobs/{id}/cancel` 停止，已停止、服务重启中断或生成失败的任务可以 `POST /api/jobs/{id}/resume` 从已保存断点继续。去背景、动作帧和 Worker 打包都会写入断点。
 
 ## AI 配置
 
@@ -53,7 +60,7 @@ SLEEP_FRAME_COUNT=12
 
 也可以把 `AI_API_BASE_URL` 指向内部网关或其他兼容服务。服务端会优先请求图片编辑接口 `/images/edits`，没有参考图时使用 `/images/generations`，并兼容 base64 与 URL 两种响应。
 
-AI 生成会把用户图片发送到配置的图像服务；生产环境应补充登录、限流、审计、对象存储和隐私告知。
+AI 生成会把用户图片发送到各自配置的图像服务；仍建议生产环境补充限流、审计、对象存储和隐私告知。
 
 ## 动画输出
 

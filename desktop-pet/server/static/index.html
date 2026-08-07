@@ -14,13 +14,58 @@
         <p class="subtitle">上传几张照片，生成待机、走动、睡觉和点击互动动作。</p>
       </section>
 
+      <section id="auth-card" class="card auth-card">
+        <div id="auth-logged-out">
+          <div class="preview-heading">
+            <div>
+              <span class="eyebrow">ACCOUNT</span>
+              <h2>登录后开始生成</h2>
+            </div>
+            <span class="preview-status">任务和 AI 配置只属于当前用户</span>
+          </div>
+          <form id="auth-form" class="auth-form">
+            <label>
+              用户名
+              <input id="auth-username" type="text" autocomplete="username" minlength="3" maxlength="40" required />
+            </label>
+            <label>
+              密码
+              <input id="auth-password" type="password" autocomplete="current-password" minlength="8" required />
+            </label>
+            <div class="form-actions">
+              <button id="auth-submit" type="submit">登录</button>
+              <button id="auth-register" class="secondary" type="button">注册并登录</button>
+            </div>
+          </form>
+          <p id="auth-status" class="settings-status"></p>
+        </div>
+        <div id="auth-logged-in" class="hidden">
+          <div class="settings-actions">
+            <span id="current-user" class="hint"></span>
+            <button id="auth-logout" class="secondary" type="button">退出登录</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="jobs-card" class="card jobs-card hidden">
+        <div class="preview-heading">
+          <div>
+            <span class="eyebrow">TASKS</span>
+            <h2>任务运行情况</h2>
+          </div>
+          <button id="refresh-jobs" class="secondary" type="button">刷新任务</button>
+        </div>
+        <div id="job-list" class="job-list"></div>
+        <p id="job-list-empty" class="hint">还没有任务。</p>
+      </section>
+
       <details class="card settings-card">
-        <summary>AI 配置（管理员）</summary>
+        <summary id="ai-settings-title">AI 配置（当前用户）</summary>
         <div class="settings-body">
-          <p class="hint">API Key 只会提交到服务端，不会返回给浏览器；需要服务器配置的 ADMIN_TOKEN。</p>
+          <p class="hint">API Key 只会提交到服务端，不会返回给浏览器。管理员令牌可查看全部任务和管理员默认配置。</p>
           <label>
-            管理令牌
-            <input id="admin-token" type="password" autocomplete="off" placeholder="输入 ADMIN_TOKEN" />
+            管理员令牌（可选）
+            <input id="admin-token" type="password" autocomplete="off" placeholder="管理员查看全部任务时填写" />
           </label>
           <div class="settings-actions">
             <button id="load-ai-settings" class="secondary" type="button">读取当前配置</button>
@@ -143,6 +188,10 @@
           <div class="progress-row"><span id="status">准备中</span><span id="percent">0%</span></div>
           <div class="bar"><div id="bar-fill"></div></div>
           <p id="message" class="hint"></p>
+          <div class="form-actions progress-actions">
+            <button id="stop-job-button" class="secondary" type="button" disabled>停止任务</button>
+          </div>
+          <div id="job-events" class="job-events"></div>
           <a id="download" class="download hidden" href="#">下载生成结果</a>
           <button id="resume-generation-button" class="secondary hidden" type="button">使用已有预览继续生成</button>
         </div>

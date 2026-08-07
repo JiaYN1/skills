@@ -6,19 +6,32 @@ import shutil
 import sys
 import uuid
 import zipfile
+from datetime import datetime
 from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import BackgroundTasks, Body, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    Cookie,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .ai_provider import ImageGenerationError, OpenAICompatibleImageProvider
+from .ai_provider import GenerationCancelled, ImageGenerationError, OpenAICompatibleImageProvider
+from .auth import AuthStoreError, SESSION_COOKIE, SESSION_TTL_DAYS, UserStore
 from .config import settings
-from .package_builder import ROLE_ANCHORS, ai_cutout_frame, build_pet_package
+from .package_builder import BuildCancelled, ROLE_ANCHORS, ai_cutout_frame, build_pet_package
 from .storage import JobStore
 
 
@@ -30,8 +43,17 @@ from pet_assets import normalize_pet_image, normalize_pet_sequence  # noqa: E402
 from pet_animation import write_animation_bundle  # noqa: E402
 from pet_common import ROLES, assign_roles, normalize_selected_actions  # noqa: E402
 
+def _default_user_ai_config() -> Dict[str, Any]:
+    values = settings.ai_snapshot()
+    # A user's first account inherits harmless generation defaults, never the
+    # administrator's private provider credential.
+    values["ai_api_key"] = ""
+    return values
+
+
 store = JobStore(settings.data_dir)
 provider = OpenAICompatibleImageProvider(settings)
+user_store = UserStore(settings.data_dir, _default_user_ai_config)
 app = FastAPI(title="AI Desktop Pet Generator", version="0.2.0")
 
 
@@ -52,6 +74,11 @@ class AISettingsUpdate(BaseModel):
     sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
 
 
+class AuthCredentials(BaseModel):
+    username: str
+    password: str
+
+
 class GenerateFromPreviewRequest(BaseModel):
     name: Optional[str] = None
     build_exe: bool = False
@@ -70,10 +97,63 @@ if settings.cors_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["*"],
     )
+
+
+@app.on_event("startup")
+def recover_interrupted_jobs() -> None:
+    # BackgroundTasks do not survive an API process restart. Turn those jobs
+    # into explicit, user-visible resumable states before serving requests.
+    store.recover_interrupted_jobs()
+
+
+@app.post("/api/auth/register")
+def register(credentials: AuthCredentials, response: Response) -> Dict[str, Any]:
+    try:
+        user = user_store.register(credentials.username, credentials.password)
+        token = user_store.create_session(user["id"])
+    except AuthStoreError as error:
+        raise HTTPException(400, str(error))
+    _set_session_cookie(response, token)
+    return {"user": user}
+
+
+@app.post("/api/auth/login")
+def login(credentials: AuthCredentials, response: Response) -> Dict[str, Any]:
+    try:
+        user = user_store.authenticate(credentials.username, credentials.password)
+        token = user_store.create_session(user["id"])
+    except AuthStoreError as error:
+        raise HTTPException(401, str(error))
+    _set_session_cookie(response, token)
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+def logout(
+    response: Response,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+) -> Dict[str, bool]:
+    user_store.delete_session(session_id)
+    response.delete_cookie(SESSION_COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(
+    response: Response,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    context = _request_context(session_id, x_admin_token)
+    if context["role"] == "admin" and settings.admin_token:
+        # The HttpOnly cookie lets browser image requests authenticate too;
+        # an <img> element cannot attach X-Admin-Token itself.
+        _set_session_cookie(response, settings.admin_token)
+    return {"user": context}
 
 
 @app.get("/healthz")
@@ -86,20 +166,39 @@ def healthz() -> Dict[str, Any]:
 
 
 @app.get("/api/settings/ai")
-def get_ai_settings(x_admin_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    _verify_admin(x_admin_token)
-    return settings.ai_public()
+def get_ai_settings(
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    context = _request_context(session_id, x_admin_token)
+    if context["role"] == "admin":
+        result = settings.ai_public()
+        result["scope"] = "admin"
+        return result
+    user_settings = settings.with_ai_snapshot(user_store.get_ai_config(context["id"]))
+    result = user_settings.ai_public()
+    result["scope"] = "user"
+    return result
 
 
 @app.put("/api/settings/ai")
 def update_ai_settings(
     payload: AISettingsUpdate,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
     x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    _verify_admin(x_admin_token)
+    context = _request_context(session_id, x_admin_token)
     try:
         values = payload.model_dump(exclude_none=True)
-        return settings.update_ai(values)
+        if context["role"] == "admin":
+            result = settings.update_ai(values)
+            result["scope"] = "admin"
+            return result
+        user_settings = settings.with_ai_snapshot(user_store.get_ai_config(context["id"]))
+        result = user_settings.update_ai_values(values)
+        user_store.save_ai_config(context["id"], user_settings.ai_snapshot())
+        result["scope"] = "user"
+        return result
     except (TypeError, ValueError) as error:
         raise HTTPException(400, str(error))
 
@@ -110,15 +209,27 @@ async def prepare_pet(
     photos: List[UploadFile] = File(...),
     name: str = Form("我的宠物"),
     selected_actions: Optional[List[str]] = Form(default=None),
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     """Create a job whose first stage only removes photo backgrounds."""
+
+    context = _request_context(session_id, x_admin_token)
 
     if not photos or len(photos) > settings.max_files:
         raise HTTPException(400, f"请上传 1-{settings.max_files} 张图片")
 
     safe_name = _safe_name(name)
     selected_actions = _normalize_requested_actions(selected_actions)
-    record = store.new_job(safe_name, len(photos), False, selected_actions)
+    record = store.new_job(
+        safe_name,
+        len(photos),
+        False,
+        selected_actions,
+        owner_id=context["id"],
+        owner_name=context["username"],
+        ai_config=_ai_snapshot_for_context(context),
+    )
     job_id = record["id"]
     try:
         saved_paths = await _save_uploaded_photos(job_id, photos)
@@ -143,13 +254,24 @@ async def generate_pet(
     name: str = Form("我的宠物"),
     build_exe: bool = Form(False),
     selected_actions: Optional[List[str]] = Form(default=None),
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
+    context = _request_context(session_id, x_admin_token)
     if not photos or len(photos) > settings.max_files:
         raise HTTPException(400, f"请上传 1-{settings.max_files} 张图片")
 
     safe_name = _safe_name(name)
     selected_actions = _normalize_requested_actions(selected_actions)
-    record = store.new_job(safe_name, len(photos), build_exe, selected_actions)
+    record = store.new_job(
+        safe_name,
+        len(photos),
+        build_exe,
+        selected_actions,
+        owner_id=context["id"],
+        owner_name=context["username"],
+        ai_config=_ai_snapshot_for_context(context),
+    )
     job_id = record["id"]
     try:
         saved_paths = await _save_uploaded_photos(job_id, photos)
@@ -173,6 +295,8 @@ def generate_from_preview(
     job_id: str,
     payload: GenerateFromPreviewRequest,
     background_tasks: BackgroundTasks,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     """Start action generation after the user confirms cutout previews."""
 
@@ -180,6 +304,7 @@ def generate_from_preview(
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    context = _request_context(session_id, x_admin_token, record)
 
     if record.get("status") != "preview_ready":
         raise HTTPException(409, "请先完成去背景预览")
@@ -222,16 +347,63 @@ def resume_failed_generation(
     job_id: str,
     payload: GenerateFromPreviewRequest,
     background_tasks: BackgroundTasks,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    """Resume action generation from an already completed cutout stage."""
+    """Resume a failed/cancelled/interrupted task from a persisted checkpoint."""
 
     try:
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    context = _request_context(session_id, x_admin_token, record)
+
+    if (
+        record.get("status") in {"cancelled", "interrupted"}
+        and record.get("package_path")
+        and str((record.get("checkpoint") or {}).get("stage", "")) == "building"
+    ):
+        package = Path(str(record["package_path"]))
+        if package.exists() and record.get("artifact_kind") == "zip":
+            if settings.build_mode != "worker":
+                raise HTTPException(409, "当前部署未启用 Windows Worker")
+            if not settings.worker_token:
+                raise HTTPException(503, "Windows Worker 未配置 WORKER_TOKEN")
+            resumed = store.update(
+                job_id,
+                status="ready_for_build",
+                cancel_requested=False,
+                message="已从打包断点恢复，等待 Windows Worker",
+                resume_count=int(record.get("resume_count", 0)) + 1,
+                error="",
+            )
+            return _public_job(resumed, include_owner=context["role"] == "admin")
+
+    checkpoint = record.get("checkpoint") or {}
+    if (
+        record.get("status") in {"failed", "cancelled", "interrupted"}
+        and not record.get("preview_paths")
+        and str(checkpoint.get("stage", "")) in {"queued", "preparation"}
+    ):
+        input_paths = _input_photo_paths(job_id)
+        if not input_paths:
+            raise HTTPException(409, "没有找到可恢复的上传图片")
+        resume_count = int(record.get("resume_count", 0)) + 1
+        store.update(
+            job_id,
+            status="preview_processing",
+            progress=int(record.get("progress", 1)),
+            phase="preparation",
+            message="已从去背景断点恢复",
+            error="",
+            cancel_requested=False,
+            resume_count=resume_count,
+        )
+        background_tasks.add_task(_run_preparation, job_id, input_paths)
+        return _public_job(store.read(job_id), include_owner=context["role"] == "admin")
 
     if not _can_resume_from_preview(record):
-        raise HTTPException(409, "当前任务没有可复用的去背景预览")
+        raise HTTPException(409, "当前任务没有可复用的去背景预览或可恢复断点")
     try:
         preview_paths = _prepared_preview_paths(job_id, record)
     except FileNotFoundError:
@@ -255,6 +427,7 @@ def resume_failed_generation(
         message="已复用去背景预览，正在继续生成动作资源",
         error="",
         resume_count=resume_count,
+        cancel_requested=False,
     )
     background_tasks.add_task(
         _run_generation,
@@ -264,23 +437,82 @@ def resume_failed_generation(
         build_exe,
         selected_actions,
     )
-    return _public_job(store.read(job_id))
+    return _public_job(store.read(job_id), include_owner=context["role"] == "admin")
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str) -> Dict[str, Any]:
+def get_job(
+    job_id: str,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    store.recover_stale_jobs()
     try:
-        return _public_job(store.read(job_id))
+        record = store.read(job_id)
+        context = _request_context(session_id, x_admin_token, record)
+        return _public_job(record, include_owner=context["role"] == "admin")
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
 
 
-@app.get("/api/jobs/{job_id}/preview/{asset_path:path}")
-def preview_job_asset(job_id: str, asset_path: str):
+@app.get("/api/jobs")
+def list_jobs(
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    store.recover_stale_jobs()
+    context = _request_context(session_id, x_admin_token)
+    records = store.list_jobs(None if context["role"] == "admin" else context["id"])
+    return {
+        "jobs": [
+            _public_job(record, include_events=False, include_owner=context["role"] == "admin")
+            for record in records
+        ],
+        "admin": context["role"] == "admin",
+    }
+
+
+@app.get("/api/jobs/{job_id}/events")
+def get_job_events(
+    job_id: str,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     try:
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
+    return {"job_id": job_id, "events": store.events(job_id)}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(
+    job_id: str,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+    context = _request_context(session_id, x_admin_token, record)
+    updated = store.request_cancel(job_id)
+    return _public_job(updated, include_owner=context["role"] == "admin")
+
+
+@app.get("/api/jobs/{job_id}/preview/{asset_path:path}")
+def preview_job_asset(
+    job_id: str,
+    asset_path: str,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+):
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
 
     relative = Path(asset_path)
     normalized = relative.as_posix()
@@ -317,11 +549,14 @@ def regenerate_cutout_preview(
     job_id: str,
     index: int,
     background_tasks: BackgroundTasks,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     try:
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
 
     if record.get("status") != "preview_ready":
         raise HTTPException(409, "当前任务不在可重新生成去背景预览的状态")
@@ -339,7 +574,9 @@ def regenerate_cutout_preview(
         job_id,
         status="preview_regenerating",
         progress=50,
+        phase="preparation",
         message=f"正在重新生成第 {index + 1} 张去背景预览",
+        checkpoint={"stage": "preparation", "operation": "cutout_regeneration", "index": index},
     )
     background_tasks.add_task(_run_cutout_regeneration, job_id, index, source)
     return _public_job(store.read(job_id))
@@ -351,11 +588,14 @@ def regenerate_resource_preview(
     role: str,
     index: int,
     background_tasks: BackgroundTasks,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     try:
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后重新生成单帧")
@@ -378,7 +618,9 @@ def regenerate_resource_preview(
         job_id,
         status="resource_regenerating",
         progress=98,
+        phase="resource_edit",
         message=f"正在重新生成 {role}_{index}.png",
+        checkpoint={"stage": "resource_edit", "operation": "regenerate", "role": role, "index": index},
     )
     background_tasks.add_task(_run_resource_regeneration, job_id, meta)
     return _public_job(store.read(job_id))
@@ -389,6 +631,8 @@ def remove_resource_frames(
     job_id: str,
     payload: RemoveResourceFramesRequest,
     background_tasks: BackgroundTasks,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     """Remove selected action frames and rebuild the downloadable package."""
 
@@ -396,6 +640,7 @@ def remove_resource_frames(
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后删除帧")
@@ -432,7 +677,9 @@ def remove_resource_frames(
         job_id,
         status="resource_editing",
         progress=99,
+        phase="resource_edit",
         message=f"正在删除 {removed_count} 帧并更新资源包",
+        checkpoint={"stage": "resource_edit", "operation": "remove", "frames": requested},
         error="",
     )
     background_tasks.add_task(_run_resource_frame_removal, job_id, requested)
@@ -444,6 +691,8 @@ def insert_resource_frame(
     job_id: str,
     payload: InsertResourceFrameRequest,
     background_tasks: BackgroundTasks,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     """Insert one AI-generated frame after an existing action frame."""
 
@@ -451,6 +700,7 @@ def insert_resource_frame(
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后插入帧")
@@ -479,7 +729,14 @@ def insert_resource_frame(
         job_id,
         status="resource_editing",
         progress=99,
+        phase="resource_edit",
         message=f"正在根据 {payload.role}_{payload.after_index}.png 插入新帧",
+        checkpoint={
+            "stage": "resource_edit",
+            "operation": "insert",
+            "role": payload.role,
+            "after_index": payload.after_index,
+        },
         error="",
     )
     background_tasks.add_task(
@@ -492,13 +749,18 @@ def insert_resource_frame(
 
 
 @app.post("/api/jobs/{job_id}/build-exe")
-def request_exe_build(job_id: str) -> Dict[str, Any]:
+def request_exe_build(
+    job_id: str,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     """Queue the Windows build for an already generated resource package."""
 
     try:
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    context = _request_context(session_id, x_admin_token, record)
 
     if settings.build_mode != "worker":
         raise HTTPException(409, "当前服务未启用 Windows Worker，请将 BUILD_MODE 设置为 worker")
@@ -518,18 +780,26 @@ def request_exe_build(job_id: str) -> Dict[str, Any]:
         build_exe=True,
         status="ready_for_build",
         progress=90,
+        phase="building",
         message="已提交 Windows exe 打包请求，等待 Worker",
         error="",
+        cancel_requested=False,
+        checkpoint={"stage": "building", "worker": "queued"},
     )
-    return _public_job(store.read(job_id))
+    return _public_job(store.read(job_id), include_owner=context["role"] == "admin")
 
 
 @app.get("/api/jobs/{job_id}/download")
-def download_job(job_id: str):
+def download_job(
+    job_id: str,
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+):
     try:
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    _request_context(session_id, x_admin_token, record)
     artifact = _artifact_path(record)
     if not artifact or not artifact.exists():
         raise HTTPException(409, "任务尚未生成可下载文件")
@@ -550,6 +820,8 @@ def worker_next(x_worker_token: Optional[str] = Header(default=None)) -> Dict[st
             "source_url": f"/api/worker/jobs/{record['id']}/source",
             "artifact_url": f"/api/worker/jobs/{record['id']}/artifact",
             "error_url": f"/api/worker/jobs/{record['id']}/error",
+            "status_url": f"/api/worker/jobs/{record['id']}/status",
+            "progress_url": f"/api/worker/jobs/{record['id']}/progress",
         }
     }
 
@@ -560,6 +832,54 @@ def worker_healthz(x_worker_token: Optional[str] = Header(default=None)) -> Dict
 
     _verify_worker(x_worker_token)
     return {"ok": True}
+
+
+@app.get("/api/worker/jobs/{job_id}/status")
+def worker_job_status(job_id: str, x_worker_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _verify_worker(x_worker_token)
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+    return {
+        "id": job_id,
+        "status": record.get("status"),
+        "cancel_requested": bool(record.get("cancel_requested")),
+        "message": record.get("message", ""),
+    }
+
+
+@app.post("/api/worker/jobs/{job_id}/progress")
+def worker_job_progress(
+    job_id: str,
+    payload: Optional[Dict[str, Any]] = Body(default=None),
+    x_worker_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _verify_worker(x_worker_token)
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
+    if record.get("cancel_requested") or record.get("status") == "cancelling":
+        return {"cancelled": True, "status": "cancelled"}
+    values = payload or {}
+    progress = values.get("progress")
+    if progress is None:
+        progress = record.get("progress", 90)
+    try:
+        progress = max(90, min(99, int(progress)))
+    except (TypeError, ValueError):
+        progress = int(record.get("progress", 90))
+    message = str(values.get("message") or record.get("message") or "Windows Worker 正在打包 exe")[-4000:]
+    updated = store.update(
+        job_id,
+        progress=progress,
+        message=message,
+        phase="building",
+        heartbeat_at=_utc_now(),
+        checkpoint={"stage": "building", "worker": "running", "progress": progress},
+    )
+    return {"cancelled": False, "status": updated.get("status"), "progress": progress}
 
 
 @app.get("/api/worker/jobs/{job_id}/source")
@@ -583,13 +903,20 @@ async def worker_artifact(
 ):
     _verify_worker(x_worker_token)
     try:
-        store.read(job_id)
+        record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
     artifact_dir = store.job_dir(job_id) / "artifact"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     target = artifact_dir / f"{_safe_name(Path(artifact.filename or 'pet').stem)}.exe"
     await _save_upload(artifact, target, limit=250_000_000)
+    if record.get("cancel_requested") or store.cancel_requested(job_id):
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        _mark_job_cancelled(job_id, "任务已停止，已忽略 Worker 生成结果")
+        return {"ok": True, "cancelled": True}
     store.update(
         job_id,
         status="ready",
@@ -597,6 +924,10 @@ async def worker_artifact(
         message="Windows exe 已生成",
         artifact_path=str(target),
         artifact_kind="exe",
+        phase="complete",
+        checkpoint={"stage": "complete", "worker": "finished"},
+        cancel_requested=False,
+        heartbeat_at=_utc_now(),
     )
     return {"ok": True, "job": _public_job(store.read(job_id))}
 
@@ -608,8 +939,23 @@ def worker_error(
     x_worker_token: Optional[str] = Header(default=None),
 ):
     _verify_worker(x_worker_token)
+    try:
+        store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "任务不存在")
     message = (payload or {}).get("message", "Windows Worker 打包失败")[-4000:]
-    store.update(job_id, status="failed", message=message, error=message)
+    if store.cancel_requested(job_id):
+        _mark_job_cancelled(job_id, "任务已停止，Worker 已结束")
+        return {"ok": True, "cancelled": True}
+    store.update(
+        job_id,
+        status="failed",
+        phase="building",
+        message=message,
+        error=message,
+        checkpoint={"stage": "building", "worker": "failed"},
+        heartbeat_at=_utc_now(),
+    )
     return {"ok": True}
 
 
@@ -620,35 +966,75 @@ async def _run_preparation(job_id: str, paths: List[Path]) -> None:
     prepared_dir.mkdir(parents=True, exist_ok=True)
     preview_paths: List[str] = []
     try:
-        if not provider.available:
+        record = store.read(job_id)
+        _check_job_cancelled(job_id)
+        task_settings = _settings_for_job(record)
+        task_provider = OpenAICompatibleImageProvider(task_settings)
+        if not task_provider.available:
             raise ImageGenerationError("AI 图像服务未配置，无法执行去背景预处理")
 
         for index, source in enumerate(paths):
+            _check_job_cancelled(job_id)
             progress = 5 + int(index * 80 / max(1, len(paths)))
             store.update(
                 job_id,
                 progress=progress,
+                phase="preparation",
                 message=f"正在为第 {index + 1}/{len(paths)} 张图片去背景",
+                heartbeat_at=_utc_now(),
+                checkpoint={
+                    "stage": "preparation",
+                    "completed_photo_indices": [
+                        item
+                        for item in range(index)
+                        if (prepared_dir / f"reference_{item}.png").exists()
+                    ],
+                    "total_photos": len(paths),
+                },
             )
             raw_path = prepared_dir / f"raw_{index}.png"
             preview_path = prepared_dir / f"reference_{index}.png"
-            await provider.remove_background(source, raw_path)
-            _normalize_ai_preview(raw_path, preview_path)
+            if not preview_path.exists():
+                await task_provider.remove_background(source, raw_path)
+                _normalize_ai_preview(raw_path, preview_path)
             preview_paths.append(f"prepared/{preview_path.name}")
+            store.update(
+                job_id,
+                checkpoint={
+                    "stage": "preparation",
+                    "completed_photo_indices": list(range(index + 1)),
+                    "total_photos": len(paths),
+                },
+                heartbeat_at=_utc_now(),
+            )
 
+        _check_job_cancelled(job_id)
         store.update(
             job_id,
             status="preview_ready",
             progress=100,
+            phase="preparation",
             message="去背景预览已完成，请确认图片后生成动作资源",
             preview_paths=preview_paths,
             error="",
+            cancel_requested=False,
+            checkpoint={
+                "stage": "preview_ready",
+                "completed_photo_indices": list(range(len(paths))),
+                "total_photos": len(paths),
+            },
         )
+    except (BuildCancelled, GenerationCancelled):
+        _mark_job_cancelled(job_id, "任务已停止，已保存去背景进度")
     except Exception as error:
+        if store.cancel_requested(job_id):
+            _mark_job_cancelled(job_id, "任务已停止，已保存去背景进度")
+            return
         store.update(
             job_id,
             status="failed",
             progress=0,
+            phase="preparation",
             message=str(error)[-4000:],
             error=str(error)[-4000:],
         )
@@ -656,11 +1042,14 @@ async def _run_preparation(job_id: str, paths: List[Path]) -> None:
 
 async def _run_cutout_regeneration(job_id: str, index: int, source: Path) -> None:
     try:
+        _check_job_cancelled(job_id)
+        task_provider = OpenAICompatibleImageProvider(_settings_for_job(store.read(job_id)))
         prepared_dir = store.job_dir(job_id) / "prepared"
         raw_path = prepared_dir / f"raw_{index}.png"
         preview_path = prepared_dir / f"reference_{index}.png"
-        await provider.remove_background(source, raw_path)
+        await task_provider.remove_background(source, raw_path)
         _normalize_ai_preview(raw_path, preview_path)
+        _check_job_cancelled(job_id)
         record = store.read(job_id)
         revision = int(record.get("preview_revision", 0)) + 1
         store.update(
@@ -671,7 +1060,12 @@ async def _run_cutout_regeneration(job_id: str, index: int, source: Path) -> Non
             preview_revision=revision,
             error="",
         )
+    except (BuildCancelled, GenerationCancelled):
+        _mark_job_cancelled(job_id, "任务已停止，已保存去背景预览")
     except Exception as error:
+        if store.cancel_requested(job_id):
+            _mark_job_cancelled(job_id, "任务已停止，已保存去背景预览")
+            return
         store.update(
             job_id,
             status="preview_ready",
@@ -684,6 +1078,9 @@ async def _run_cutout_regeneration(job_id: str, index: int, source: Path) -> Non
 async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -> None:
     try:
         record = store.read(job_id)
+        _check_job_cancelled(job_id)
+        task_settings = _settings_for_job(record)
+        task_provider = OpenAICompatibleImageProvider(task_settings)
         role = str(target_meta["role"])
         index = int(target_meta["index"])
         frame_count = int(target_meta.get("frame_count") or 1)
@@ -695,22 +1092,23 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
         role_inputs = assign_roles(prepared_paths)
         identity_reference = prepared_paths[0]
         raw_path = job_dir / "ai" / role / f"{role}_{index}.png"
-        await provider.generate_action_frame(
+        await task_provider.generate_action_frame(
             role_inputs[role],
             role,
             raw_path,
             identity_reference=identity_reference,
             frame_index=index,
             frame_count=frame_count,
-            pose_consistency=getattr(settings, "pose_consistency", True),
+            pose_consistency=getattr(task_settings, "pose_consistency", True),
         )
         cleaned_path = job_dir / "ai" / role / f"{role}_{index}_cutout.png"
         try:
-            replacement_source = await ai_cutout_frame(provider, raw_path, cleaned_path)
+            replacement_source = await ai_cutout_frame(task_provider, raw_path, cleaned_path)
         except Exception:
             # The normalizer still has a simple connected-background fallback;
             # keep the existing resource usable if the extra AI pass fails.
             replacement_source = raw_path
+        _check_job_cancelled(job_id)
 
         all_meta = [
             dict(item)
@@ -742,6 +1140,7 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
             anchor=ROLE_ANCHORS.get(role, "center"),
             subject_scale=0.96,
         )
+        _check_job_cancelled(job_id)
 
         package_dir = job_dir / "package"
         zip_path = Path(record["package_path"])
@@ -756,7 +1155,12 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
             resource_preview_revision=revision,
             error="",
         )
+    except (BuildCancelled, GenerationCancelled):
+        _mark_job_cancelled(job_id, "任务已停止，已保存当前资源断点")
     except Exception as error:
+        if store.cancel_requested(job_id):
+            _mark_job_cancelled(job_id, "任务已停止，已保存当前资源断点")
+            return
         store.update(
             job_id,
             status="ready",
@@ -774,6 +1178,8 @@ def _run_resource_frame_removal(
 
     try:
         record = store.read(job_id)
+        _check_job_cancelled(job_id)
+        task_settings = _settings_for_job(record)
         job_dir = store.job_dir(job_id)
         package_dir = job_dir / "package"
         config_path = package_dir / "pet_config.json"
@@ -792,6 +1198,7 @@ def _run_resource_frame_removal(
             config_assets = {}
 
         for role, removed_indices in requested.items():
+            _check_job_cancelled(job_id)
             role_items = [
                 item
                 for item in all_meta
@@ -825,8 +1232,8 @@ def _run_resource_frame_removal(
             package_dir,
             config_assets,
             mode=animation_config.get("mode", "hybrid"),
-            fps=animation_config.get("fps", getattr(settings, "animation_fps", 12)),
-            frame_repeat=animation_config.get("frame_repeat", getattr(settings, "frame_repeat", 1)),
+            fps=animation_config.get("fps", getattr(task_settings, "animation_fps", 12)),
+            frame_repeat=animation_config.get("frame_repeat", getattr(task_settings, "frame_repeat", 1)),
         )
         config_data["assets"] = config_assets
         config_data["animation"] = animation_manifest
@@ -849,6 +1256,7 @@ def _run_resource_frame_removal(
         )
 
         zip_path = Path(record["package_path"])
+        _check_job_cancelled(job_id)
         _rebuild_package_archive(package_dir, zip_path)
         resource_preview_paths = [
             str(item["asset_path"])
@@ -868,7 +1276,12 @@ def _run_resource_frame_removal(
             frame_repeat=animation_manifest.get("frame_repeat", 1),
             error="",
         )
+    except (BuildCancelled, GenerationCancelled):
+        _mark_job_cancelled(job_id, "任务已停止，已保存当前资源断点")
     except Exception as error:
+        if store.cancel_requested(job_id):
+            _mark_job_cancelled(job_id, "任务已停止，已保存当前资源断点")
+            return
         store.update(
             job_id,
             status="ready",
@@ -955,6 +1368,9 @@ async def _run_resource_frame_insertion(
 
     try:
         record = store.read(job_id)
+        _check_job_cancelled(job_id)
+        task_settings = _settings_for_job(record)
+        task_provider = OpenAICompatibleImageProvider(task_settings)
         job_dir = store.job_dir(job_id)
         package_dir = job_dir / "package"
         config_path = package_dir / "pet_config.json"
@@ -975,33 +1391,29 @@ async def _run_resource_frame_insertion(
         if job_dir.resolve() not in previous_source.parents or not previous_source.is_file():
             raise ValueError("前一帧参考文件不存在")
 
-        prepared_paths = _prepared_preview_paths(job_id, record)
-        # Keep the immediately preceding frame even when the administrator
-        # limits the provider to a single reference image. With the normal
-        # two-reference setting, the identity anchor is sent first as well.
-        identity_reference = (
-            prepared_paths[0]
-            if int(getattr(settings, "ai_max_references", 2)) >= 2
-            else None
-        )
+        _prepared_preview_paths(job_id, record)
+        # Insertion is deliberately a one-reference operation: the frame
+        # immediately before the gap is the only continuity reference.
+        identity_reference = None
         insertion_index = after_index + 1
         token = uuid.uuid4().hex
         raw_path = job_dir / "ai" / role / f"{role}_inserted_{token}.png"
-        await provider.generate_action_frame(
+        await task_provider.generate_action_frame(
             [previous_source],
             role,
             raw_path,
             identity_reference=identity_reference,
             frame_index=insertion_index,
             frame_count=len(role_meta) + 1,
-            pose_consistency=getattr(settings, "pose_consistency", True),
+            pose_consistency=getattr(task_settings, "pose_consistency", True),
             continuity_reference=True,
         )
         cleaned_path = raw_path.with_name(f"{raw_path.stem}_cutout.png")
         try:
-            replacement_source = await ai_cutout_frame(provider, raw_path, cleaned_path)
+            replacement_source = await ai_cutout_frame(task_provider, raw_path, cleaned_path)
         except Exception:
             replacement_source = raw_path
+        _check_job_cancelled(job_id)
 
         inserted = {
             "asset_path": "",
@@ -1019,6 +1431,7 @@ async def _run_resource_frame_insertion(
             role,
             desired_role_items,
         )
+        _check_job_cancelled(job_id)
         updated_meta = _replace_resource_role_metadata(
             all_meta,
             role,
@@ -1037,8 +1450,8 @@ async def _run_resource_frame_insertion(
             package_dir,
             config_assets,
             mode=animation_config.get("mode", "hybrid"),
-            fps=animation_config.get("fps", getattr(settings, "animation_fps", 12)),
-            frame_repeat=animation_config.get("frame_repeat", getattr(settings, "frame_repeat", 1)),
+            fps=animation_config.get("fps", getattr(task_settings, "animation_fps", 12)),
+            frame_repeat=animation_config.get("frame_repeat", getattr(task_settings, "frame_repeat", 1)),
         )
         config_data["assets"] = config_assets
         config_data["animation"] = animation_manifest
@@ -1076,7 +1489,12 @@ async def _run_resource_frame_insertion(
             frame_repeat=animation_manifest.get("frame_repeat", 1),
             error="",
         )
+    except (BuildCancelled, GenerationCancelled):
+        _mark_job_cancelled(job_id, "任务已停止，已保存当前资源断点")
     except Exception as error:
+        if store.cancel_requested(job_id):
+            _mark_job_cancelled(job_id, "任务已停止，已保存当前资源断点")
+            return
         store.update(
             job_id,
             status="ready",
@@ -1093,21 +1511,51 @@ async def _run_generation(
     build_exe: bool,
     selected_actions: List[str],
 ) -> None:
-    store.update(job_id, status="processing", progress=5, message="正在准备照片")
+    record = store.read(job_id)
+    if record.get("cancel_requested"):
+        _mark_job_cancelled(job_id, "任务已停止，未开始新的处理")
+        return
+    task_settings = _settings_for_job(record)
+    task_provider = OpenAICompatibleImageProvider(task_settings)
+    resume_checkpoint = dict(record.get("checkpoint") or {})
+    store.update(
+        job_id,
+        status="processing",
+        progress=max(5, int(record.get("progress", 0))),
+        phase="actions",
+        message="正在准备照片",
+        heartbeat_at=_utc_now(),
+    )
 
     def progress(value: int, message: str) -> None:
+        _check_job_cancelled(job_id)
         store.update(job_id, progress=value, message=message)
+
+    def write_checkpoint(value: Dict[str, object]) -> None:
+        _check_job_cancelled(job_id)
+        checkpoint_message = _checkpoint_message(value)
+        store.update(
+            job_id,
+            checkpoint=dict(value),
+            phase=str(value.get("stage", "actions")),
+            message=checkpoint_message,
+            heartbeat_at=_utc_now(),
+        )
 
     try:
         result = await build_pet_package(
             store.job_dir(job_id),
             name,
             paths,
-            provider,
-            settings,
+            task_provider,
+            task_settings,
             progress,
             selected_actions=selected_actions,
+            should_cancel=lambda: store.cancel_requested(job_id),
+            checkpoint=write_checkpoint,
+            resume_checkpoint=resume_checkpoint,
         )
+        _check_job_cancelled(job_id)
         zip_path = Path(result["zip_path"])
         next_status = "ready_for_build" if build_exe and settings.build_mode == "worker" else "ready"
         ai_frame_total = int(result["ai_frame_total"])
@@ -1129,15 +1577,34 @@ async def _run_generation(
             artifact_kind="zip",
             ai_frame_total=ai_frame_total,
             ai_error_count=result["ai_error_count"],
-            animation_mode=result.get("animation_mode", settings.animation_mode),
-            frame_repeat=result.get("frame_repeat", settings.frame_repeat),
-            animation_fps=result.get("animation_fps", settings.animation_fps),
+            animation_mode=result.get("animation_mode", task_settings.animation_mode),
+            frame_repeat=result.get("frame_repeat", task_settings.frame_repeat),
+            animation_fps=result.get("animation_fps", task_settings.animation_fps),
             selected_actions=result.get("selected_actions", selected_actions),
             resource_preview_paths=result.get("resource_preview_paths", []),
             resource_frame_meta=result.get("resource_frame_meta", []),
+            phase="building" if next_status == "ready_for_build" else "complete",
+            checkpoint={
+                "stage": "building" if next_status == "ready_for_build" else "complete",
+                "completed_roles": list(ROLES),
+            },
+            cancel_requested=False,
+            heartbeat_at=_utc_now(),
         )
+    except (BuildCancelled, GenerationCancelled):
+        _mark_job_cancelled(job_id, "任务已停止，已保存当前断点")
     except Exception as error:
-        store.update(job_id, status="failed", progress=0, message=str(error)[-4000:], error=str(error)[-4000:])
+        if store.cancel_requested(job_id):
+            _mark_job_cancelled(job_id, "任务已停止，已保存当前断点")
+            return
+        store.update(
+            job_id,
+            status="failed",
+            phase="actions",
+            message=str(error)[-4000:],
+            error=str(error)[-4000:],
+            heartbeat_at=_utc_now(),
+        )
 
 
 async def _save_uploaded_photos(job_id: str, photos: List[UploadFile]) -> List[Path]:
@@ -1190,6 +1657,24 @@ def _input_photo_path(job_id: str, index: int) -> Optional[Path]:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _input_photo_paths(job_id: str) -> List[Path]:
+    input_dir = store.job_dir(job_id) / "input"
+    return sorted(
+        path
+        for path in input_dir.glob("photo_*")
+        if path.is_file() and path.suffix.lower() in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".bmp",
+            ".gif",
+            ".tif",
+            ".tiff",
+        }
+    )
+
+
 def _prepared_preview_paths(job_id: str, record: Dict[str, Any]) -> List[Path]:
     """Resolve stored cutout previews and reject missing or escaped files."""
 
@@ -1208,12 +1693,16 @@ def _prepared_preview_paths(job_id: str, record: Dict[str, Any]) -> List[Path]:
 
 
 def _can_resume_from_preview(record: Dict[str, Any]) -> bool:
-    """Only action-generation failures can resume from cutout previews."""
+    """Whether the task has enough persisted data for a user-visible resume."""
 
     return (
-        record.get("status") == "failed"
-        and bool(record.get("preview_paths"))
+        record.get("status") in {"failed", "cancelled", "interrupted"}
         and not record.get("package_path")
+        and (
+            bool(record.get("preview_paths"))
+            or str((record.get("checkpoint") or {}).get("stage", ""))
+            in {"queued", "preparation", "actions", "packaging"}
+        )
     )
 
 
@@ -1253,7 +1742,11 @@ def _artifact_path(record: Dict[str, Any]) -> Optional[Path]:
     return Path(path) if path else None
 
 
-def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
+def _public_job(
+    record: Dict[str, Any],
+    include_events: bool = True,
+    include_owner: bool = False,
+) -> Dict[str, Any]:
     result = dict(record)
     preview_paths = list(result.pop("preview_paths", []))
     resource_preview_paths = list(result.pop("resource_preview_paths", []))
@@ -1262,6 +1755,19 @@ def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
         for item in result.pop("resource_frame_meta", [])
         if isinstance(item, dict)
     ]
+    result.pop("ai_config", None)
+    owner_id = result.pop("owner_id", None)
+    owner_name = result.pop("owner_name", None)
+    if include_owner and owner_id:
+        result["owner"] = {"id": owner_id, "username": owner_name or ""}
+    if not include_events:
+        result.pop("events", None)
+    else:
+        result["events"] = [
+            dict(item)
+            for item in result.get("events", [])
+            if isinstance(item, dict)
+        ]
     result.pop("artifact_path", None)
     result.pop("package_path", None)
     result["preview_images"] = _preview_entries(
@@ -1278,8 +1784,24 @@ def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
     )
     if record.get("artifact_path"):
         result["download_url"] = f"/api/jobs/{record['id']}/download"
-    if _can_resume_from_preview(record):
+    if _can_resume_from_preview(record) or (
+        record.get("status") in {"cancelled", "interrupted"}
+        and record.get("package_path")
+        and str((record.get("checkpoint") or {}).get("stage", "")) == "building"
+    ):
         result["resume_url"] = f"/api/jobs/{record['id']}/resume"
+    if record.get("status") in {
+        "queued",
+        "preview_processing",
+        "preview_regenerating",
+        "processing",
+        "resource_regenerating",
+        "resource_editing",
+        "ready_for_build",
+        "building",
+        "cancelling",
+    }:
+        result["cancel_url"] = f"/api/jobs/{record['id']}/cancel"
     return result
 
 
@@ -1354,6 +1876,113 @@ def _normalize_requested_actions(values: Optional[List[str]]) -> List[str]:
         return normalize_selected_actions(values)
     except ValueError as error:
         raise HTTPException(400, str(error))
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=SESSION_TTL_DAYS * 24 * 60 * 60,
+        httponly=True,
+        samesite="lax",
+        secure=settings.auth_cookie_secure,
+    )
+
+
+def _request_context(
+    session_id: Optional[str],
+    admin_token: Optional[str],
+    record: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Authenticate a browser request or the legacy unowned test job.
+
+    Existing installations may contain jobs created before accounts existed.
+    Those records have no owner and remain readable only through their exact
+    ID for backwards compatibility; every newly created job always has an
+    owner and requires a real account or the administrator token.
+    """
+
+    if admin_token:
+        _verify_admin(admin_token)
+        return {"id": "admin", "username": "管理员", "role": "admin"}
+    if session_id and settings.admin_token:
+        try:
+            if hmac.compare_digest(session_id, settings.admin_token):
+                return {"id": "admin", "username": "管理员", "role": "admin"}
+        except (TypeError, ValueError):
+            pass
+    user = user_store.get_session_user(session_id)
+    if user:
+        if record is not None and record.get("owner_id") != user.get("id"):
+            # Do not reveal whether another user's job ID exists.
+            raise HTTPException(404, "任务不存在")
+        return user
+    if record is not None and not record.get("owner_id") and not session_id:
+        return {"id": "legacy", "username": "历史任务", "role": "legacy"}
+    raise HTTPException(401, "请先登录")
+
+
+def _ai_snapshot_for_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    if context.get("role") == "admin":
+        return settings.ai_snapshot()
+    if context.get("role") == "legacy":
+        return settings.ai_snapshot()
+    return user_store.get_ai_config(str(context["id"]))
+
+
+def _settings_for_job(record: Dict[str, Any]):
+    snapshot = record.get("ai_config")
+    return settings.with_ai_snapshot(snapshot if isinstance(snapshot, dict) else {})
+
+
+def _checkpoint_message(value: Dict[str, object]) -> str:
+    stage = str(value.get("stage", ""))
+    if stage == "actions" and value.get("role"):
+        labels = {"idle": "待机", "walk": "走动", "sleep": "睡觉", "react": "点击反应"}
+        role = labels.get(str(value.get("role")), str(value.get("role")))
+        return f"{role}动作已处理第 {int(value.get('completed_frame_count', 0))} 帧"
+    if stage == "packaging":
+        return "动作帧已完成，正在写入资源包"
+    if stage == "preparation":
+        completed = value.get("completed_photo_indices") or []
+        total = value.get("total_photos") or "?"
+        return f"去背景已完成 {len(completed)}/{total} 张图片"
+    return "任务正在保存断点"
+
+
+def _check_job_cancelled(job_id: str) -> None:
+    if store.cancel_requested(job_id):
+        raise BuildCancelled("任务已停止")
+
+
+def _mark_job_cancelled(job_id: str, message: str) -> None:
+    try:
+        record = store.read(job_id)
+    except (FileNotFoundError, ValueError):
+        return
+    if record.get("phase") == "resource_edit":
+        store.update(
+            job_id,
+            status="ready",
+            message="已停止资源编辑，已保留当前可用资源",
+            error="",
+            cancel_requested=False,
+            heartbeat_at=_utc_now(),
+        )
+        return
+    store.update(
+        job_id,
+        status="cancelled",
+        message=message,
+        error="",
+        cancel_requested=True,
+        progress=int(record.get("progress", 0)),
+        heartbeat_at=_utc_now(),
+    )
+
+
+def _utc_now() -> str:
+    return datetime.utcnow().isoformat() + "Z"
 
 
 def _verify_worker(token: Optional[str]) -> None:

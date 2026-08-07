@@ -103,10 +103,18 @@ def process_job(job) -> None:
         )
         response.raise_for_status()
         source_zip.write_bytes(response.content)
+        if is_cancelled(job):
+            print(f"任务 {job['id']} 已被停止，跳过打包")
+            return
+        post_progress(job, 92, "Worker 已下载资源包，开始构建 exe")
         extract_zip(source_zip, root / "package")
         package = root / "package"
         config = json.loads((package / "pet_config.json").read_text(encoding="utf-8"))
         executable = build_exe(package, config.get("name", job["name"]))
+        if is_cancelled(job):
+            print(f"任务 {job['id']} 在构建期间被停止，忽略 exe")
+            return
+        post_progress(job, 99, "exe 已构建完成，正在上传")
         with executable.open("rb") as handle:
             upload = {"artifact": (executable.name, handle, "application/vnd.microsoft.portable-executable")}
             result = requests.post(
@@ -117,6 +125,34 @@ def process_job(job) -> None:
             )
         result.raise_for_status()
         print(f"任务 {job['id']} 完成：{executable.name}")
+
+
+def is_cancelled(job) -> bool:
+    status_url = job.get("status_url")
+    if not status_url:
+        return False
+    response = requests.get(
+        f"{SERVER_URL}{status_url}",
+        headers=headers(),
+        timeout=30,
+    )
+    response.raise_for_status()
+    return bool(response.json().get("cancel_requested"))
+
+
+def post_progress(job, progress: int, message: str) -> None:
+    progress_url = job.get("progress_url")
+    if not progress_url:
+        return
+    response = requests.post(
+        f"{SERVER_URL}{progress_url}",
+        headers=headers(),
+        json={"progress": progress, "message": message},
+        timeout=30,
+    )
+    response.raise_for_status()
+    if response.json().get("cancelled"):
+        raise RuntimeError("任务已停止")
 
 
 def build_exe(package: Path, pet_name: str) -> Path:

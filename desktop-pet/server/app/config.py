@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict
 
@@ -43,6 +44,7 @@ class Settings:
     worker_token: str
     admin_token: str
     cors_origins: str
+    auth_cookie_secure: bool = False
     pose_consistency: bool = True
     animation_mode: str = "hybrid"
     animation_fps: int = 12
@@ -77,6 +79,7 @@ class Settings:
             worker_token=os.getenv("WORKER_TOKEN", "").strip(),
             admin_token=os.getenv("ADMIN_TOKEN", "").strip(),
             cors_origins=os.getenv("CORS_ORIGINS", "").strip(),
+            auth_cookie_secure=_env_bool("AUTH_COOKIE_SECURE", False),
             pose_consistency=_env_bool("POSE_CONSISTENCY", True),
             animation_mode=_animation_mode(os.getenv("ANIMATION_MODE", "hybrid")),
             animation_fps=max(1, min(60, _env_int("ANIMATION_FPS", 12))),
@@ -178,6 +181,17 @@ class Settings:
         temporary.replace(self.runtime_file)
 
     def update_ai(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.update_ai_values(values)
+        self._persist_runtime_values()
+        return result
+
+    def update_ai_values(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and apply AI values without persisting global settings.
+
+        User-specific settings use the same validation rules as the legacy
+        administrator configuration but persist through UserStore instead of
+        mutating the process-wide Settings instance.
+        """
         if "enabled" in values and values["enabled"] is not None:
             self.ai_enabled = bool(values["enabled"])
 
@@ -220,8 +234,37 @@ class Settings:
         if values.get("sleep_frame_count") is not None:
             self.sleep_frame_count = max(1, min(24, int(values["sleep_frame_count"])))
 
-        self._persist_runtime_values()
         return self.ai_public()
+
+    def ai_snapshot(self) -> Dict[str, Any]:
+        """Return the private AI fields needed by a task configuration snapshot."""
+
+        return {
+            "ai_enabled": self.ai_enabled,
+            "ai_api_key": self.ai_api_key,
+            "ai_api_base_url": self.ai_api_base_url,
+            "ai_image_model": self.ai_image_model,
+            "ai_timeout_seconds": self.ai_timeout_seconds,
+            "ai_frame_count": self.ai_frame_count,
+            "ai_max_references": self.ai_max_references,
+            "pose_consistency": self.pose_consistency,
+            "animation_mode": self.animation_mode,
+            "animation_fps": self.animation_fps,
+            "frame_repeat": self.frame_repeat,
+            "walk_frame_count": self.walk_frame_count,
+            "sleep_frame_count": self.sleep_frame_count,
+        }
+
+    def with_ai_snapshot(self, values: Dict[str, Any]) -> "Settings":
+        """Clone process settings while replacing only AI-related fields."""
+
+        result = replace(self)
+        if not isinstance(values, dict):
+            return result
+        for key in self.ai_snapshot():
+            if key in values:
+                setattr(result, key, values[key])
+        return result
 
     def ai_public(self) -> Dict[str, Any]:
         masked_key = ""

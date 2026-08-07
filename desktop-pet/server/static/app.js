@@ -1,10 +1,27 @@
 const form = document.querySelector("#pet-form");
+const authCard = document.querySelector("#auth-card");
+const authLoggedOut = document.querySelector("#auth-logged-out");
+const authLoggedIn = document.querySelector("#auth-logged-in");
+const authForm = document.querySelector("#auth-form");
+const authUsernameInput = document.querySelector("#auth-username");
+const authPasswordInput = document.querySelector("#auth-password");
+const authSubmit = document.querySelector("#auth-submit");
+const authRegisterButton = document.querySelector("#auth-register");
+const authStatus = document.querySelector("#auth-status");
+const authLogoutButton = document.querySelector("#auth-logout");
+const currentUserText = document.querySelector("#current-user");
+const jobsCard = document.querySelector("#jobs-card");
+const jobList = document.querySelector("#job-list");
+const jobListEmpty = document.querySelector("#job-list-empty");
+const refreshJobsButton = document.querySelector("#refresh-jobs");
 const submitButton = document.querySelector("#submit");
 const progress = document.querySelector("#progress");
 const statusText = document.querySelector("#status");
 const percentText = document.querySelector("#percent");
 const messageText = document.querySelector("#message");
 const barFill = document.querySelector("#bar-fill");
+const stopJobButton = document.querySelector("#stop-job-button");
+const jobEvents = document.querySelector("#job-events");
 const download = document.querySelector("#download");
 const resumeGenerationButton = document.querySelector("#resume-generation-button");
 const buildExeButton = document.querySelector("#build-exe-button");
@@ -30,6 +47,8 @@ const loadAiSettingsButton = document.querySelector("#load-ai-settings");
 const aiSettingsStatus = document.querySelector("#ai-settings-status");
 let currentJobId = null;
 let currentJob = null;
+let currentUser = null;
+let authBusy = false;
 let selectedResourceFrames = new Set();
 const ACTION_LABELS = {
   idle: "待机",
@@ -42,6 +61,52 @@ let actionPlayerRole = "";
 let actionPlayerIndex = 0;
 let actionPlayerTimer = null;
 let actionPlayerPlaying = false;
+
+function optionalAdminHeaders() {
+  const token = adminTokenInput ? adminTokenInput.value.trim() : "";
+  return token ? { "X-Admin-Token": token } : {};
+}
+
+function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const admin = optionalAdminHeaders();
+  for (const [key, value] of Object.entries(admin)) headers.set(key, value);
+  return fetch(url, { ...options, headers, credentials: "same-origin" });
+}
+
+function setAuthStatus(message, isError = false) {
+  authStatus.textContent = message;
+  authStatus.classList.toggle("error", isError);
+}
+
+function setFormAccess(enabled) {
+  form.querySelectorAll("input, select, button").forEach((element) => {
+    if (element.id === "restart-preview") return;
+    element.disabled = !enabled;
+  });
+  document.querySelector("#ai-settings-form").querySelectorAll("input, select, button").forEach((element) => {
+    element.disabled = !enabled;
+  });
+}
+
+function setAuthenticated(user) {
+  currentUser = user;
+  const isAuthenticated = Boolean(user);
+  authLoggedOut.classList.toggle("hidden", isAuthenticated);
+  authLoggedIn.classList.toggle("hidden", !isAuthenticated);
+  jobsCard.classList.toggle("hidden", !isAuthenticated);
+  currentUserText.textContent = user
+    ? `${user.username}（${user.role === "admin" ? "管理员" : "普通用户"}）`
+    : "";
+  document.querySelector("#ai-settings-title").textContent = user?.role === "admin"
+    ? "AI 配置（管理员默认配置）"
+    : "AI 配置（当前用户）";
+  setFormAccess(isAuthenticated);
+  if (isAuthenticated) {
+    loadAiSettings();
+    loadJobs();
+  }
+}
 
 function selectedActions() {
   return [...document.querySelectorAll('input[name="selected_actions"]')]
@@ -161,6 +226,110 @@ function adminHeaders() {
   if (!token) throw new Error("请先输入 ADMIN_TOKEN");
   return { "X-Admin-Token": token };
 }
+
+async function loadSession() {
+  try {
+    const response = await apiFetch("/api/auth/me");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "尚未登录");
+    setAuthenticated(payload.user);
+    setAuthStatus("");
+  } catch (error) {
+    setAuthenticated(null);
+    setAuthStatus("请输入账号登录，或注册一个新账号。", false);
+  }
+}
+
+async function submitAuth(registerMode) {
+  if (authBusy) return;
+  authBusy = true;
+  authSubmit.disabled = true;
+  authRegisterButton.disabled = true;
+  try {
+    const response = await apiFetch(`/api/auth/${registerMode ? "register" : "login"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: authUsernameInput.value.trim(),
+        password: authPasswordInput.value,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "登录失败");
+    authPasswordInput.value = "";
+    setAuthenticated(payload.user);
+    setAuthStatus("");
+  } catch (error) {
+    setAuthStatus(error.message || String(error), true);
+  } finally {
+    authBusy = false;
+    authSubmit.disabled = false;
+    authRegisterButton.disabled = false;
+  }
+}
+
+authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitAuth(false);
+});
+authRegisterButton.addEventListener("click", () => submitAuth(true));
+authLogoutButton.addEventListener("click", async () => {
+  await apiFetch("/api/auth/logout", { method: "POST" });
+  setAuthenticated(null);
+  setAuthStatus("已退出登录");
+});
+
+async function loadJobs() {
+  if (!currentUser) return;
+  try {
+    const response = await apiFetch("/api/jobs");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "读取任务列表失败");
+    renderJobList(payload.jobs || []);
+  } catch (error) {
+    jobList.replaceChildren();
+    jobListEmpty.textContent = error.message || String(error);
+  }
+}
+
+function renderJobList(jobs) {
+  jobList.replaceChildren();
+  jobListEmpty.classList.toggle("hidden", jobs.length > 0);
+  for (const job of jobs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `job-list-item${job.id === currentJobId ? " active" : ""}`;
+    button.dataset.jobId = job.id;
+    const title = document.createElement("strong");
+    title.textContent = job.name || job.id;
+    const detail = document.createElement("span");
+    const owner = job.owner?.username ? ` · ${job.owner.username}` : "";
+    detail.textContent = `${job.status || "unknown"} · ${Number(job.progress || 0)}%${owner}`;
+    const message = document.createElement("small");
+    message.textContent = job.message || "";
+    button.append(title, detail, message);
+    button.addEventListener("click", () => openJob(job.id));
+    jobList.append(button);
+  }
+}
+
+async function openJob(jobId) {
+  try {
+    const response = await apiFetch(`/api/jobs/${jobId}`);
+    const job = await response.json();
+    if (!response.ok) throw new Error(job.detail || "读取任务详情失败");
+    currentJobId = job.id;
+    showProgress(job);
+    loadJobs();
+    if (!["preview_ready", "ready", "failed", "cancelled", "interrupted"].includes(job.status)) {
+      poll(job.id);
+    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
+refreshJobsButton.addEventListener("click", loadJobs);
 
 function setAiSettingsStatus(message, isError = false) {
   aiSettingsStatus.textContent = message;
@@ -284,7 +453,7 @@ async function regeneratePreview(item, button) {
   restartPreviewButton.disabled = true;
   buildExeButton.disabled = true;
   try {
-    const response = await fetch(item.regenerate_url, { method: "POST" });
+    const response = await apiFetch(item.regenerate_url, { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "重新生成预览失败");
     showProgress(payload);
@@ -303,7 +472,7 @@ async function insertResourceFrame(item, button) {
   selectedResourceFrames.clear();
   updateResourceSelectionControls(false);
   try {
-    const response = await fetch(`/api/jobs/${currentJobId}/previews/resource/insert`, {
+    const response = await apiFetch(`/api/jobs/${currentJobId}/previews/resource/insert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: item.role, after_index: item.index }),
@@ -319,7 +488,7 @@ async function insertResourceFrame(item, button) {
 
 async function loadAiSettings() {
   try {
-    const response = await fetch("/api/settings/ai", { headers: adminHeaders() });
+    const response = await apiFetch("/api/settings/ai");
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "读取 AI 配置失败");
     fillAiSettings(payload);
@@ -351,9 +520,9 @@ aiSettingsForm.addEventListener("submit", async (event) => {
       clear_api_key: document.querySelector("#ai-clear-key").checked,
     };
     if (key) body.api_key = key;
-    const response = await fetch("/api/settings/ai", {
+    const response = await apiFetch("/api/settings/ai", {
       method: "PUT",
-      headers: { ...adminHeaders(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const payload = await response.json();
@@ -375,6 +544,7 @@ function showProgress(job) {
   percentText.textContent = `${percent}%`;
   barFill.style.width = `${percent}%`;
   messageText.textContent = job.message || "";
+  renderJobEvents(job.events || []);
   if (job.download_url) {
     download.href = job.download_url;
     download.classList.remove("hidden");
@@ -382,7 +552,21 @@ function showProgress(job) {
   }
   const canResume = Boolean(job.resume_url);
   resumeGenerationButton.classList.toggle("hidden", !canResume);
-  resumeGenerationButton.disabled = !canResume || job.status !== "failed";
+  resumeGenerationButton.disabled = !canResume || !["failed", "cancelled", "interrupted"].includes(job.status);
+  resumeGenerationButton.textContent = job.status === "failed" && job.preview_images?.length
+    ? "使用已有预览继续生成"
+    : "从断点恢复";
+  stopJobButton.disabled = !job.cancel_url || ![
+    "queued",
+    "preview_processing",
+    "preview_regenerating",
+    "processing",
+    "resource_regenerating",
+    "resource_editing",
+    "ready_for_build",
+    "building",
+    "cancelling",
+  ].includes(job.status);
   const canBuildExe = canQueueExeBuild(job);
   buildExeButton.textContent =
     job.status === "failed" && job.artifact_kind === "zip"
@@ -405,7 +589,53 @@ function showProgress(job) {
   confirmPreviewButton.disabled = job.status !== "preview_ready";
   restartPreviewButton.disabled = job.status !== "preview_ready";
   buildExeButton.disabled = !canBuildExe;
+  if (currentUser) renderJobListItemSelection();
 }
+
+function renderJobEvents(events) {
+  jobEvents.replaceChildren();
+  if (!Array.isArray(events) || !events.length) return;
+  const heading = document.createElement("strong");
+  heading.textContent = "运行记录";
+  jobEvents.append(heading);
+  for (const event of events.slice(-30).reverse()) {
+    const row = document.createElement("div");
+    row.className = "job-event";
+    const time = document.createElement("time");
+    time.textContent = event.time || "";
+    const text = document.createElement("span");
+    const checkpoint = event.checkpoint || {};
+    const checkpointText = checkpoint.role
+      ? ` · ${checkpoint.role} 第 ${checkpoint.completed_frame_count || 0} 帧`
+      : "";
+    text.textContent = `${event.status || ""} · ${event.progress ?? 0}% · ${event.message || ""}${checkpointText}`;
+    row.append(time, text);
+    jobEvents.append(row);
+  }
+}
+
+function renderJobListItemSelection() {
+  jobList.querySelectorAll(".job-list-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.jobId === currentJobId);
+  });
+}
+
+async function stopCurrentJob() {
+  if (!currentJobId || !currentJob?.cancel_url || stopJobButton.disabled) return;
+  stopJobButton.disabled = true;
+  try {
+    const response = await apiFetch(currentJob.cancel_url, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "停止任务失败");
+    showProgress(payload);
+    loadJobs();
+    if (!["cancelled", "failed", "interrupted"].includes(payload.status)) await poll(currentJobId);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+stopJobButton.addEventListener("click", stopCurrentJob);
 
 async function removeSelectedFrames() {
   if (!currentJobId || !selectedResourceFrames.size || removeSelectedFramesButton.disabled) return;
@@ -423,7 +653,7 @@ async function removeSelectedFrames() {
   submitButton.disabled = true;
   buildExeButton.disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${currentJobId}/previews/resource/remove`, {
+    const response = await apiFetch(`/api/jobs/${currentJobId}/previews/resource/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ frames }),
@@ -475,7 +705,7 @@ function canQueueExeBuild(job) {
 }
 
 async function poll(jobId) {
-  const response = await fetch(`/api/jobs/${jobId}`);
+  const response = await apiFetch(`/api/jobs/${jobId}`);
   const job = await response.json();
   if (!response.ok) throw new Error(job.detail || "读取任务失败");
   showProgress(job);
@@ -483,8 +713,9 @@ async function poll(jobId) {
     submitButton.disabled = true;
     return;
   }
-  if (["ready", "failed"].includes(job.status)) {
+  if (["ready", "failed", "cancelled", "interrupted"].includes(job.status)) {
     submitButton.disabled = false;
+    loadJobs();
     return;
   }
   window.setTimeout(() => poll(jobId).catch(showError), 1500);
@@ -498,7 +729,7 @@ resumeGenerationButton.addEventListener("click", async () => {
   restartPreviewButton.disabled = true;
   buildExeButton.disabled = true;
   try {
-    const response = await fetch(currentJob.resume_url, {
+    const response = await apiFetch(currentJob.resume_url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -521,7 +752,7 @@ function showError(error) {
   restartPreviewButton.disabled = false;
   buildExeButton.disabled = !canQueueExeBuild(currentJob);
   resumeGenerationButton.disabled = !(
-    currentJob && currentJob.status === "failed" && currentJob.resume_url
+    currentJob && ["failed", "cancelled", "interrupted"].includes(currentJob.status) && currentJob.resume_url
   );
   updateResourceSelectionControls(Boolean(
     currentJob && currentJob.status === "ready" && currentJob.artifact_kind === "zip",
@@ -562,7 +793,7 @@ form.addEventListener("submit", async (event) => {
   actions.forEach((action) => body.append("selected_actions", action));
   for (const file of files) body.append("photos", file);
   try {
-    const response = await fetch("/api/pets/prepare", { method: "POST", body });
+    const response = await apiFetch("/api/pets/prepare", { method: "POST", body });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "提交失败");
     currentJobId = payload.id;
@@ -578,7 +809,7 @@ confirmPreviewButton.addEventListener("click", async () => {
   confirmPreviewButton.disabled = true;
   submitButton.disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${currentJobId}/generate`, {
+    const response = await apiFetch(`/api/jobs/${currentJobId}/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -618,7 +849,7 @@ buildExeButton.addEventListener("click", async () => {
   buildExeButton.disabled = true;
   submitButton.disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${currentJobId}/build-exe`, { method: "POST" });
+    const response = await apiFetch(`/api/jobs/${currentJobId}/build-exe`, { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "提交 exe 打包请求失败");
     showProgress(payload);
@@ -627,3 +858,7 @@ buildExeButton.addEventListener("click", async () => {
     showError(error);
   }
 });
+
+adminTokenInput.addEventListener("change", loadSession);
+setFormAccess(false);
+loadSession();
