@@ -38,9 +38,9 @@ docker compose up -d --build
 
 用户确认预览后，浏览器调用 `POST /api/jobs/{id}/generate`，服务端才开始生成动作资源。上传照片时可以选择本次要调用 AI 的动作；未选择的动作使用照片/程序化动画兜底，不消耗 AI 动作帧额度。任务完成后同一个任务状态会返回 `resource_preview_images`，可直接在页面查看各动作 PNG 帧，再下载 zip 或请求 Windows Worker。如果动作资源阶段失败但去背景预览仍然存在，可调用 `POST /api/jobs/{id}/resume` 复用已有预览继续生成，不会重复去背景。
 
-资源包生成成功但 Windows Worker 打包 exe 失败时，任务会保留 zip；页面会显示“重试打包 Windows exe”，再次提交 `POST /api/jobs/{id}/build-exe` 即可重试。
+资源包生成成功但 Windows Worker 打包 exe 失败时，任务会保留 zip；页面会显示“重试打包 Windows exe”，再次提交 `POST /api/jobs/{id}/build-exe` 即可重试。即使任务已经生成过 exe，仍可打开同一个任务继续预览、重新生成、删除或插入动作帧；编辑开始时旧 exe 会被标记为过期并保留在任务目录中作为回退，编辑完成后任务恢复为 zip 资源包状态，再提交同一个 `build-exe` 接口即可生成新版 exe。
 
-`GET /api/jobs` 返回当前用户任务，管理员令牌返回全部任务；点击任务后可查看 `GET /api/jobs/{id}/events` 的阶段、进度和 checkpoint。运行中的任务可以 `POST /api/jobs/{id}/cancel` 停止，已停止、服务重启中断或生成失败的任务可以 `POST /api/jobs/{id}/resume` 从已保存断点继续。去背景、动作帧和 Worker 打包都会写入断点。
+`GET /api/jobs` 返回当前用户任务，管理员令牌返回全部任务；点击任务后可查看 `GET /api/jobs/{id}/events` 的阶段、进度和 checkpoint。运行中的任务可以通过页面“停止并保存断点”按钮或 `POST /api/jobs/{id}/cancel` 停止，已停止、服务重启中断或生成失败的任务可以通过“从断点恢复”或 `POST /api/jobs/{id}/resume` 继续。去背景、动作帧、资源帧编辑和 Worker 打包都会写入断点；Worker 在收到停止请求后会确认取消，避免任务一直停留在 cancelling 状态。
 
 ## AI 配置
 

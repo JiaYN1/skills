@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,27 @@ class WorkerBuildCommandTests(unittest.TestCase):
             self.assertIn("PIL.ImageTk", hidden_imports)
             self.assertNotIn("--clean", command)
             self.assertEqual(run.call_args_list[1].args[0][-1], "--self-test")
+
+    @patch("worker.subprocess.Popen")
+    def test_cancellable_build_terminates_pyinstaller(self, popen: Mock) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["pyinstaller"], 1),
+            ("", ""),
+        ]
+        popen.return_value = process
+        checks = iter((False, True))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(worker.WorkerCancelled):
+                worker._run_pyinstaller(
+                    ["pyinstaller"],
+                    Path(temporary),
+                    should_cancel=lambda: next(checks),
+                )
+
+        process.terminate.assert_called_once_with()
 
 
 if __name__ == "__main__":

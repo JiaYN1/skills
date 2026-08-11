@@ -11,6 +11,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import requests
 
@@ -32,6 +33,10 @@ PYINSTALLER_PIL_OPTIONS = [
     "--hidden-import",
     "PIL._imagingtk",
 ]
+
+
+class WorkerCancelled(RuntimeError):
+    """Raised when the server asks the Windows build to stop."""
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -110,7 +115,11 @@ def process_job(job) -> None:
         extract_zip(source_zip, root / "package")
         package = root / "package"
         config = json.loads((package / "pet_config.json").read_text(encoding="utf-8"))
-        executable = build_exe(package, config.get("name", job["name"]))
+        executable = build_exe(
+            package,
+            config.get("name", job["name"]),
+            should_cancel=lambda: is_cancelled(job),
+        )
         if is_cancelled(job):
             print(f"任务 {job['id']} 在构建期间被停止，忽略 exe")
             return
@@ -155,7 +164,7 @@ def post_progress(job, progress: int, message: str) -> None:
         raise RuntimeError("任务已停止")
 
 
-def build_exe(package: Path, pet_name: str) -> Path:
+def build_exe(package: Path, pet_name: str, should_cancel=None) -> Path:
     safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in pet_name).strip(" .") or "my-pet"
     dist = package / "dist"
     spec = package / "spec"
@@ -190,7 +199,10 @@ def build_exe(package: Path, pet_name: str) -> Path:
         if metadata_path.exists():
             command.extend(["--add-data", f"{metadata_path};."])
     command.append(str(package / "pet_runtime.py"))
-    subprocess.run(command, cwd=str(package), check=True)
+    result = _run_pyinstaller(command, package, should_cancel)
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"PyInstaller 打包失败：\n{details[-3000:]}")
     executable = dist / f"{safe_name}.exe"
     if not executable.exists():
         raise RuntimeError("PyInstaller 没有生成 exe")
@@ -210,6 +222,57 @@ def build_exe(package: Path, pet_name: str) -> Path:
             f"{details[-3000:]}"
         )
     return executable
+
+
+def _run_pyinstaller(command, package: Path, should_cancel=None):
+    """Run PyInstaller while allowing the server stop request to terminate it."""
+
+    if should_cancel is None:
+        return subprocess.run(command, cwd=str(package), check=False)
+
+    process = subprocess.Popen(
+        command,
+        cwd=str(package),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout = ""
+    stderr = ""
+    while True:
+        try:
+            if should_cancel():
+                _terminate_process(process)
+                raise WorkerCancelled("任务已停止，已终止 Windows exe 打包")
+        except WorkerCancelled:
+            raise
+        except Exception:
+            # A transient status request failure should not orphan the
+            # PyInstaller process or turn a healthy build into a cancellation.
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    return SimpleNamespace(
+        returncode=process.returncode,
+        stdout=stdout or "",
+        stderr=stderr or "",
+    )
+
+
+def _terminate_process(process) -> None:
+    """Terminate a cancellable build and force-kill it if needed."""
+
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
 
 
 def extract_zip(source: Path, destination: Path) -> None:

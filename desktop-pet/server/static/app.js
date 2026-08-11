@@ -359,7 +359,7 @@ function updateResourceSelectionControls(canDelete = false) {
   const count = selectedResourceFrames.size;
   resourceSelectionText.textContent = count
     ? `已选择 ${count} 帧`
-    : "勾选突变帧删除，或点击帧下方按钮补帧";
+    : "勾选突变帧删除，或点击帧下方按钮补帧；已生成 exe 也能继续编辑";
   removeSelectedFramesButton.disabled = !canDelete || count === 0;
 }
 
@@ -555,8 +555,12 @@ function showProgress(job) {
   resumeGenerationButton.disabled = !canResume || !["failed", "cancelled", "interrupted"].includes(job.status);
   resumeGenerationButton.textContent = job.status === "failed" && job.preview_images?.length
     ? "使用已有预览继续生成"
+    : job.checkpoint?.stage === "resource_edit"
+    ? "继续资源编辑"
+    : job.checkpoint?.stage === "building"
+    ? "继续 Windows exe 打包"
     : "从断点恢复";
-  stopJobButton.disabled = !job.cancel_url || ![
+  stopJobButton.disabled = !job.cancel_url || ["cancelling"].includes(job.status) || ![
     "queued",
     "preview_processing",
     "preview_regenerating",
@@ -569,7 +573,9 @@ function showProgress(job) {
   ].includes(job.status);
   const canBuildExe = canQueueExeBuild(job);
   buildExeButton.textContent =
-    job.status === "failed" && job.artifact_kind === "zip"
+    job.artifact_kind === "exe"
+      ? "重新生成 Windows exe"
+      : job.status === "failed" && job.artifact_kind === "zip"
       ? "重试打包 Windows exe"
       : "第二步：打包 Windows exe";
   renderPreviewImages(
@@ -582,7 +588,7 @@ function showProgress(job) {
     job.resource_preview_images,
     resourcePreviewSection,
     resourcePreviewGrid,
-    job.status === "ready" && job.artifact_kind === "zip",
+    canEditResource(job),
     true,
   );
   updateActionPlayer(job.resource_preview_images, job);
@@ -699,8 +705,16 @@ function canQueueExeBuild(job) {
   return Boolean(
     currentJobId &&
       job &&
-      job.artifact_kind === "zip" &&
+      ["zip", "exe"].includes(job.artifact_kind) &&
       ["ready", "failed"].includes(job.status),
+  );
+}
+
+function canEditResource(job) {
+  return Boolean(
+    job &&
+      job.status === "ready" &&
+      ["zip", "exe"].includes(job.artifact_kind),
   );
 }
 
@@ -754,9 +768,7 @@ function showError(error) {
   resumeGenerationButton.disabled = !(
     currentJob && ["failed", "cancelled", "interrupted"].includes(currentJob.status) && currentJob.resume_url
   );
-  updateResourceSelectionControls(Boolean(
-    currentJob && currentJob.status === "ready" && currentJob.artifact_kind === "zip",
-  ));
+  updateResourceSelectionControls(canEditResource(currentJob));
   progress.classList.remove("hidden");
   statusText.textContent = "failed";
   messageText.textContent = error.message || String(error);

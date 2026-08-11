@@ -364,7 +364,7 @@ def resume_failed_generation(
         and str((record.get("checkpoint") or {}).get("stage", "")) == "building"
     ):
         package = Path(str(record["package_path"]))
-        if package.exists() and record.get("artifact_kind") == "zip":
+        if package.exists() and record.get("artifact_kind") in {"zip", "exe"}:
             if settings.build_mode != "worker":
                 raise HTTPException(409, "当前部署未启用 Windows Worker")
             if not settings.worker_token:
@@ -380,6 +380,88 @@ def resume_failed_generation(
             return _public_job(resumed, include_owner=context["role"] == "admin")
 
     checkpoint = record.get("checkpoint") or {}
+    if (
+        record.get("status") in {"cancelled", "interrupted"}
+        and record.get("package_path")
+        and str(checkpoint.get("stage", "")) == "resource_edit"
+    ):
+        _ensure_editable_resource_package(record)
+        operation = str(checkpoint.get("operation") or "")
+        resume_count = int(record.get("resume_count", 0)) + 1
+        common_changes = {
+            "phase": "resource_edit",
+            "progress": max(98, int(record.get("progress", 98))),
+            "error": "",
+            "cancel_requested": False,
+            "resume_count": resume_count,
+            "heartbeat_at": _utc_now(),
+        }
+        if operation == "regenerate":
+            role = str(checkpoint.get("role") or "")
+            try:
+                index = int(checkpoint.get("index", -1))
+            except (TypeError, ValueError):
+                index = -1
+            meta = _resource_frame_meta(record, role, index)
+            if role not in ROLES or index < 0 or meta is None:
+                raise HTTPException(409, "动作帧重新生成断点已失效")
+            resumed = store.update(
+                job_id,
+                **common_changes,
+                status="resource_regenerating",
+                message=f"已从断点恢复，正在重新生成 {role}_{index}.png",
+            )
+            background_tasks.add_task(_run_resource_regeneration, job_id, meta)
+            return _public_job(resumed, include_owner=context["role"] == "admin")
+
+        if operation == "remove":
+            raw_frames = checkpoint.get("frames")
+            if not isinstance(raw_frames, dict) or not raw_frames:
+                raise HTTPException(409, "动作帧删除断点已失效")
+            requested: Dict[str, List[int]] = {}
+            try:
+                for role, raw_indices in raw_frames.items():
+                    if role not in ROLES or not isinstance(raw_indices, list):
+                        raise ValueError
+                    indices = sorted(set(int(index) for index in raw_indices))
+                    if not indices:
+                        raise ValueError
+                    requested[role] = indices
+            except (TypeError, ValueError):
+                raise HTTPException(409, "动作帧删除断点已失效")
+            resumed = store.update(
+                job_id,
+                **common_changes,
+                status="resource_editing",
+                message="已从断点恢复，正在继续删除动作帧",
+            )
+            background_tasks.add_task(_run_resource_frame_removal, job_id, requested)
+            return _public_job(resumed, include_owner=context["role"] == "admin")
+
+        if operation == "insert":
+            role = str(checkpoint.get("role") or "")
+            try:
+                after_index = int(checkpoint.get("after_index", -1))
+            except (TypeError, ValueError):
+                after_index = -1
+            if role not in ROLES or after_index < 0:
+                raise HTTPException(409, "动作帧插入断点已失效")
+            resumed = store.update(
+                job_id,
+                **common_changes,
+                status="resource_editing",
+                message=f"已从断点恢复，正在根据 {role}_{after_index}.png 插入动作帧",
+            )
+            background_tasks.add_task(
+                _run_resource_frame_insertion,
+                job_id,
+                role,
+                after_index,
+            )
+            return _public_job(resumed, include_owner=context["role"] == "admin")
+
+        raise HTTPException(409, "资源编辑断点已失效")
+
     if (
         record.get("status") in {"failed", "cancelled", "interrupted"}
         and not record.get("preview_paths")
@@ -599,8 +681,7 @@ def regenerate_resource_preview(
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后重新生成单帧")
-    if record.get("artifact_kind") != "zip":
-        raise HTTPException(409, "请在打包 Windows exe 之前重新生成动作帧")
+    _ensure_editable_resource_package(record)
     if role not in ROLES or index < 0:
         raise HTTPException(404, "动作帧不存在")
     meta = _resource_frame_meta(record, role, index)
@@ -614,8 +695,10 @@ def regenerate_resource_preview(
     if not prepared_paths or not all(path.exists() for path in prepared_paths):
         raise HTTPException(409, "去背景参考图不存在，请重新上传")
 
+    artifact_changes = _prepare_resource_edit(record)
     store.update(
         job_id,
+        **artifact_changes,
         status="resource_regenerating",
         progress=98,
         phase="resource_edit",
@@ -644,8 +727,7 @@ def remove_resource_frames(
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后删除帧")
-    if record.get("artifact_kind") != "zip":
-        raise HTTPException(409, "请在打包 Windows exe 之前删除动作帧")
+    _ensure_editable_resource_package(record)
     if not payload.frames:
         raise HTTPException(400, "至少选择一帧动作帧")
 
@@ -673,8 +755,10 @@ def remove_resource_frames(
         requested[role] = indices
 
     removed_count = sum(len(indices) for indices in requested.values())
+    artifact_changes = _prepare_resource_edit(record)
     store.update(
         job_id,
+        **artifact_changes,
         status="resource_editing",
         progress=99,
         phase="resource_edit",
@@ -704,8 +788,7 @@ def insert_resource_frame(
 
     if record.get("status") != "ready":
         raise HTTPException(409, "请在动作资源生成完成后插入帧")
-    if record.get("artifact_kind") != "zip":
-        raise HTTPException(409, "请在打包 Windows exe 之前插入动作帧")
+    _ensure_editable_resource_package(record)
     if payload.role not in ROLES:
         raise HTTPException(400, f"不支持的动作：{payload.role}")
 
@@ -725,8 +808,10 @@ def insert_resource_frame(
     ):
         raise HTTPException(404, "参考动作帧不存在")
 
+    artifact_changes = _prepare_resource_edit(record)
     store.update(
         job_id,
+        **artifact_changes,
         status="resource_editing",
         progress=99,
         phase="resource_edit",
@@ -770,13 +855,20 @@ def request_exe_build(
     package = record.get("package_path")
     if not package or not Path(package).exists():
         raise HTTPException(409, "资源包尚未生成完成")
-    if record.get("artifact_kind") == "exe":
-        raise HTTPException(409, "该任务已经生成 Windows exe")
+    if record.get("artifact_kind") not in {"zip", "exe"}:
+        raise HTTPException(409, "当前任务没有可重新打包的资源包")
     if record.get("status") not in {"ready", "failed"}:
         raise HTTPException(409, f"当前任务状态为 {record.get('status') or 'unknown'}，暂时不能打包 exe")
 
+    artifact_changes = {}
+    if record.get("artifact_kind") == "exe":
+        # Rebuilding an unchanged package also invalidates the currently
+        # advertised executable so a cancelled upload cannot destroy the
+        # user's only recoverable copy.
+        artifact_changes = _prepare_resource_edit(record)
     store.update(
         job_id,
+        **artifact_changes,
         build_exe=True,
         status="ready_for_build",
         progress=90,
@@ -841,6 +933,14 @@ def worker_job_status(job_id: str, x_worker_token: Optional[str] = Header(defaul
         record = store.read(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
+    if record.get("cancel_requested") or record.get("status") == "cancelling":
+        record = store.update(
+            job_id,
+            status="cancelled",
+            message="任务已停止，Worker 已结束",
+            cancel_requested=True,
+            heartbeat_at=_utc_now(),
+        )
     return {
         "id": job_id,
         "status": record.get("status"),
@@ -861,7 +961,14 @@ def worker_job_progress(
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "任务不存在")
     if record.get("cancel_requested") or record.get("status") == "cancelling":
-        return {"cancelled": True, "status": "cancelled"}
+        updated = store.update(
+            job_id,
+            status="cancelled",
+            message="任务已停止，Worker 已结束",
+            cancel_requested=True,
+            heartbeat_at=_utc_now(),
+        )
+        return {"cancelled": True, "status": updated.get("status")}
     values = payload or {}
     progress = values.get("progress")
     if progress is None:
@@ -917,19 +1024,22 @@ async def worker_artifact(
             pass
         _mark_job_cancelled(job_id, "任务已停止，已忽略 Worker 生成结果")
         return {"ok": True, "cancelled": True}
-    store.update(
+    stale_artifact_path = record.get("stale_artifact_path")
+    updated = store.update(
         job_id,
         status="ready",
         progress=100,
         message="Windows exe 已生成",
         artifact_path=str(target),
         artifact_kind="exe",
+        stale_artifact_path="",
         phase="complete",
         checkpoint={"stage": "complete", "worker": "finished"},
         cancel_requested=False,
         heartbeat_at=_utc_now(),
     )
-    return {"ok": True, "job": _public_job(store.read(job_id))}
+    _remove_stale_artifact(stale_artifact_path, target)
+    return {"ok": True, "job": _public_job(updated)}
 
 
 @app.post("/api/worker/jobs/{job_id}/error")
@@ -1153,6 +1263,9 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
             message=f"{role}_{index}.png 已重新生成，资源包已更新",
             resource_frame_meta=updated_meta,
             resource_preview_revision=revision,
+            artifact_path=str(zip_path),
+            artifact_kind="zip",
+            build_exe=True,
             error="",
         )
     except (BuildCancelled, GenerationCancelled):
@@ -1274,6 +1387,9 @@ def _run_resource_frame_removal(
             resource_frame_meta=updated_meta,
             resource_preview_revision=revision,
             frame_repeat=animation_manifest.get("frame_repeat", 1),
+            artifact_path=str(zip_path),
+            artifact_kind="zip",
+            build_exe=True,
             error="",
         )
     except (BuildCancelled, GenerationCancelled):
@@ -1487,6 +1603,9 @@ async def _run_resource_frame_insertion(
             resource_frame_meta=updated_meta,
             resource_preview_revision=revision,
             frame_repeat=animation_manifest.get("frame_repeat", 1),
+            artifact_path=str(zip_path),
+            artifact_kind="zip",
+            build_exe=True,
             error="",
         )
     except (BuildCancelled, GenerationCancelled):
@@ -1723,6 +1842,73 @@ def _resource_frame_meta(
     return None
 
 
+def _ensure_editable_resource_package(record: Dict[str, Any]) -> Path:
+    """Validate that the persisted resource package can still be edited.
+
+    A completed EXE does not make the source package immutable.  The package
+    remains the source of truth for future edits and Worker rebuilds.
+    """
+
+    if record.get("artifact_kind") not in {"zip", "exe"}:
+        raise HTTPException(409, "当前任务没有可编辑的资源包")
+    package_value = record.get("package_path")
+    package = Path(str(package_value)) if package_value else None
+    if package is None or not package.is_file():
+        raise HTTPException(409, "资源包不存在，无法编辑动作帧")
+    return package
+
+
+def _prepare_resource_edit(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Invalidate a downloaded EXE while retaining it as a rollback artifact.
+
+    Once an asset changes, the old EXE must not be advertised as the current
+    result.  Move it aside instead of deleting it, so a failed edit/build can
+    still be recovered from the server's job directory.
+    """
+
+    package = _ensure_editable_resource_package(record)
+    changes: Dict[str, Any] = {
+        "artifact_path": str(package),
+        "artifact_kind": "zip",
+    }
+    existing_stale = record.get("stale_artifact_path")
+    if existing_stale:
+        changes["stale_artifact_path"] = str(existing_stale)
+
+    if record.get("artifact_kind") != "exe":
+        return changes
+
+    artifact_value = record.get("artifact_path")
+    artifact = Path(str(artifact_value)) if artifact_value else None
+    if artifact is None or not artifact.is_file():
+        return changes
+    stale = artifact.with_name(
+        f"{artifact.stem}.stale-{uuid.uuid4().hex[:12]}{artifact.suffix}"
+    )
+    try:
+        artifact.replace(stale)
+    except OSError:
+        # The old file is not part of the new package state.  Leave it in
+        # place if the filesystem refuses the move; the next Worker upload
+        # will safely overwrite the canonical artifact path.
+        return changes
+    changes["stale_artifact_path"] = str(stale)
+    return changes
+
+
+def _remove_stale_artifact(value: Any, current: Path) -> None:
+    """Best-effort cleanup after a replacement EXE has uploaded."""
+
+    if not value:
+        return
+    try:
+        stale = Path(str(value)).resolve()
+        if stale != current.resolve() and stale.is_file():
+            stale.unlink()
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+
 def _relative_job_path(job_dir: Path, source: Path) -> str:
     try:
         return source.resolve().relative_to(job_dir.resolve()).as_posix()
@@ -1770,6 +1956,7 @@ def _public_job(
         ]
     result.pop("artifact_path", None)
     result.pop("package_path", None)
+    result.pop("stale_artifact_path", None)
     result["preview_images"] = _preview_entries(
         record["id"],
         preview_paths,
@@ -1788,6 +1975,10 @@ def _public_job(
         record.get("status") in {"cancelled", "interrupted"}
         and record.get("package_path")
         and str((record.get("checkpoint") or {}).get("stage", "")) == "building"
+    ) or (
+        record.get("status") in {"cancelled", "interrupted"}
+        and record.get("package_path")
+        and str((record.get("checkpoint") or {}).get("stage", "")) == "resource_edit"
     ):
         result["resume_url"] = f"/api/jobs/{record['id']}/resume"
     if record.get("status") in {
@@ -1963,10 +2154,11 @@ def _mark_job_cancelled(job_id: str, message: str) -> None:
     if record.get("phase") == "resource_edit":
         store.update(
             job_id,
-            status="ready",
-            message="已停止资源编辑，已保留当前可用资源",
+            status="cancelled",
+            message="已停止资源编辑，当前断点已保存，可继续恢复",
             error="",
-            cancel_requested=False,
+            cancel_requested=True,
+            progress=int(record.get("progress", 0)),
             heartbeat_at=_utc_now(),
         )
         return

@@ -172,8 +172,8 @@ class JobStore:
             if record.get("phase") == "resource_edit" and record.get("package_path"):
                 self.update(
                     record["id"],
-                    status="ready",
-                    message="服务重启时资源编辑已停止，保留当前可用资源",
+                    status="interrupted",
+                    message="服务重启时资源编辑已中断，可从断点恢复",
                     cancel_requested=False,
                 )
                 recovered += 1
@@ -228,8 +228,8 @@ class JobStore:
                 continue
             if record.get("phase") == "resource_edit" and record.get("package_path"):
                 changes = {
-                    "status": "ready",
-                    "message": "资源编辑心跳超时，已保留当前可用资源",
+                    "status": "interrupted",
+                    "message": "资源编辑心跳超时，可从断点恢复",
                     "cancel_requested": False,
                 }
             elif record.get("status") == "building" and record.get("package_path"):

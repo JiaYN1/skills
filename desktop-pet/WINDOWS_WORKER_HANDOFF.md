@@ -78,6 +78,7 @@ Worker Token 必须和 Windows 的 `worker/.env` 完全一致，且不能复用�
 5. 保持 PowerShell 中的 Worker 运行。
 6. 任务状态应从 `ready_for_build` 变为 `building`，最后变为 `ready`。
 7. 浏览器下载链接应显示为 Windows exe。
+8. 如果任务运行中需要中止，点击“停止并保存断点”；任务变为 cancelled 后点击“继续 Windows exe 打包”或“从断点恢复”，Worker 会重新领取资源包继续执行。PyInstaller 正在运行时，Worker 会主动终止当前子进程。
 
 如果 AI 没有配置，Worker 仍然可以把照片动画兜底资源打包成 exe；这只能验证打包链路，不能验证 AI 动作帧质量。
 

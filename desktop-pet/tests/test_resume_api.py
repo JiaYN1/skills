@@ -84,6 +84,41 @@ class ResumeGenerationEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.main.store.read(record["id"])["status"], "failed")
 
+    def test_cancelled_resource_edit_can_resume_from_its_checkpoint(self) -> None:
+        package = Path(self.temporary.name) / "pet.zip"
+        package.write_bytes(b"resource package")
+        record = self.main.store.new_job("pet", 1, True)
+        self.main.store.update(
+            record["id"],
+            status="cancelled",
+            phase="resource_edit",
+            package_path=str(package),
+            artifact_path=str(package),
+            artifact_kind="zip",
+            cancel_requested=True,
+            checkpoint={
+                "stage": "resource_edit",
+                "operation": "remove",
+                "frames": {"walk": [1]},
+            },
+        )
+        captured = []
+
+        def fake_remove(job_id, requested):
+            captured.append((job_id, requested))
+
+        original_runner = self.main._run_resource_frame_removal
+        self.main._run_resource_frame_removal = fake_remove
+        try:
+            response = self.client.post(f"/api/jobs/{record['id']}/resume", json={})
+        finally:
+            self.main._run_resource_frame_removal = original_runner
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "resource_editing")
+        self.assertEqual(captured, [(record["id"], {"walk": [1]})])
+        self.assertFalse(self.main.store.read(record["id"])["cancel_requested"])
+
 
 if __name__ == "__main__":
     unittest.main()

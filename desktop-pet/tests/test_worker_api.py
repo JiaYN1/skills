@@ -91,6 +91,48 @@ class WorkerHealthEndpointTests(unittest.TestCase):
         self.assertEqual(updated["error"], "")
         self.assertTrue(updated["build_exe"])
 
+    def test_completed_exe_can_be_rebuilt_from_the_same_resource_package(self) -> None:
+        package = Path(self.temporary.name) / "pet.zip"
+        package.write_bytes(b"resource package")
+        artifact = Path(self.temporary.name) / "pet.exe"
+        artifact.write_bytes(b"old exe")
+        record = self.main.store.new_job("pet", 1, True)
+        self.main.store.update(
+            record["id"],
+            status="ready",
+            package_path=str(package),
+            artifact_path=str(artifact),
+            artifact_kind="exe",
+        )
+
+        response = self.client.post(f"/api/jobs/{record['id']}/build-exe")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ready_for_build")
+        updated = self.main.store.read(record["id"])
+        self.assertEqual(updated["artifact_kind"], "zip")
+        self.assertEqual(updated["artifact_path"], str(package))
+        self.assertTrue(Path(updated["stale_artifact_path"]).is_file())
+        self.assertFalse(artifact.exists())
+
+    def test_worker_status_acknowledges_a_stop_request(self) -> None:
+        record = self.main.store.new_job("pet", 1, True)
+        self.main.store.update(
+            record["id"],
+            status="cancelling",
+            cancel_requested=True,
+            phase="building",
+        )
+
+        response = self.client.get(
+            f"/api/worker/jobs/{record['id']}/status",
+            headers={"X-Worker-Token": "worker-test-token"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cancelled")
+        self.assertEqual(self.main.store.read(record["id"])["status"], "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()

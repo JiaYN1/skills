@@ -4,6 +4,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from fastapi import BackgroundTasks
 from PIL import Image
 
 from pet_animation import write_animation_bundle
@@ -102,6 +103,74 @@ class ResourceFrameEditTests(unittest.TestCase):
             self.assertIn("assets/walk_0.png", archive.namelist())
             self.assertIn("assets/walk_1.png", archive.namelist())
             self.assertNotIn("assets/walk_2.png", archive.namelist())
+
+    def test_editing_completed_exe_stashes_old_artifact_and_switches_to_zip(self):
+        record = main.store.new_job("pet", 1, True)
+        job_dir = main.store.job_dir(record["id"])
+        package = job_dir / "pet.zip"
+        package.write_bytes(b"resource package")
+        artifact_dir = job_dir / "artifact"
+        artifact_dir.mkdir(parents=True)
+        artifact = artifact_dir / "pet.exe"
+        artifact.write_bytes(b"old exe")
+        main.store.update(
+            record["id"],
+            status="ready",
+            package_path=str(package),
+            artifact_path=str(artifact),
+            artifact_kind="exe",
+        )
+
+        changes = main._prepare_resource_edit(main.store.read(record["id"]))
+        main.store.update(record["id"], **changes)
+        updated = main.store.read(record["id"])
+
+        self.assertEqual(updated["artifact_kind"], "zip")
+        self.assertEqual(updated["artifact_path"], str(package))
+        stale = Path(updated["stale_artifact_path"])
+        self.assertTrue(stale.is_file())
+        self.assertFalse(artifact.exists())
+        self.assertNotIn("stale_artifact_path", main._public_job(updated))
+
+    def test_remove_endpoint_accepts_a_completed_exe_task(self):
+        record = main.store.new_job("pet", 1, True)
+        job_dir = main.store.job_dir(record["id"])
+        package = job_dir / "pet.zip"
+        package.write_bytes(b"resource package")
+        artifact = job_dir / "pet.exe"
+        artifact.write_bytes(b"old exe")
+        metadata = [
+            {
+                "asset_path": f"package/assets/walk_{index}.png",
+                "source_path": f"ai/walk/walk_{index}.png",
+                "role": "walk",
+                "index": index,
+                "frame_count": 2,
+            }
+            for index in range(2)
+        ]
+        main.store.update(
+            record["id"],
+            status="ready",
+            package_path=str(package),
+            artifact_path=str(artifact),
+            artifact_kind="exe",
+            resource_preview_paths=[item["asset_path"] for item in metadata],
+            resource_frame_meta=metadata,
+        )
+
+        result = main.remove_resource_frames(
+            record["id"],
+            main.RemoveResourceFramesRequest(frames={"walk": [0]}),
+            BackgroundTasks(),
+            session_id=None,
+            x_admin_token=None,
+        )
+
+        self.assertEqual(result["status"], "resource_editing")
+        updated = main.store.read(record["id"])
+        self.assertEqual(updated["artifact_kind"], "zip")
+        self.assertTrue(Path(updated["stale_artifact_path"]).is_file())
 
 
 if __name__ == "__main__":
