@@ -162,11 +162,11 @@ def _access_password() -> str:
 
 
 def _session_ttl_seconds() -> int:
-    value = os.getenv("ACCESS_SESSION_TTL_SECONDS", "43200").strip()
+    value = os.getenv("ACCESS_SESSION_TTL_SECONDS", "2592000").strip()
     try:
         return max(int(value), 60)
     except ValueError:
-        return 43200
+        return 2592000
 
 
 def _is_public_path(path: str) -> bool:

@@ -41,7 +41,7 @@ docker run --rm -p 19986:19986 \
 - `MAX_DIFF_CHARS`: 可选，默认 `120000`。
 - `ACCESS_PASSWORD`: 可选；设置后启用访问密码。
 - `ACCESS_SESSION_SECRET`: 可选；用于签名登录 cookie，未设置时会基于 `ACCESS_PASSWORD` 派生。
-- `ACCESS_SESSION_TTL_SECONDS`: 可选；登录态有效期，默认 `43200` 秒。
+- `ACCESS_SESSION_TTL_SECONDS`: 可选；登录态有效期，默认 `2592000` 秒（30 天）。
 - `GITHUB_TOKEN` / `GITLAB_TOKEN` / `GITCODE_TOKEN`: 可选，私有 PR/MR 或发布评论时需要。
 
 前端也可以临时输入平台 token；后端不会持久化 token。
