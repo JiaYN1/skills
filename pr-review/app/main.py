@@ -6,6 +6,8 @@ import os
 import time
 from pathlib import Path
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -55,6 +57,35 @@ async def password_gate(request: Request, call_next):
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/models")
+async def list_models() -> dict:
+    default_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    result = {"default_model": default_model, "models": [default_model]}
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        result["warning"] = "未配置模型服务，当前仅可选择默认模型。"
+        return result
+
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
+            )
+            response.raise_for_status()
+        data = response.json()["data"]
+        if not isinstance(data, list):
+            raise ValueError("Invalid model list")
+        model_ids = {
+            item["id"] for item in data
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
+        }
+        result["models"] = [default_model, *sorted(model_ids - {default_model})]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        result["warning"] = "无法获取模型列表，当前仅可选择默认模型。"
+    return result
 
 
 @app.get("/login", include_in_schema=False)

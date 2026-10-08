@@ -46,6 +46,8 @@ docker run --rm -p 19986:19986 \
 
 前端也可以临时输入平台 token；后端不会持久化 token。
 
+前端模型使用下拉列表选择，列表从已配置模型服务的 `/models` 接口获取，默认选中 `OPENAI_MODEL`。模型服务不支持获取列表或请求失败时，仍可选择默认模型。
+
 ## API
 
 ### `POST /api/review`

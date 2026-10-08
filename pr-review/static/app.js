@@ -1,7 +1,8 @@
 const form = document.querySelector("#reviewForm");
 const prUrlInput = document.querySelector("#prUrl");
 const scmTokenInput = document.querySelector("#scmToken");
-const modelInput = document.querySelector("#model");
+const modelSelect = document.querySelector("#model");
+const modelHint = document.querySelector("#modelHint");
 const reviewButton = document.querySelector("#reviewButton");
 const publishButton = document.querySelector("#publishButton");
 const serviceState = document.querySelector("#serviceState");
@@ -18,6 +19,7 @@ const selectAll = document.querySelector("#selectAll");
 let currentComments = [];
 
 checkHealth();
+loadModels();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -46,6 +48,25 @@ async function checkHealth() {
   }
 }
 
+async function loadModels() {
+  try {
+    const response = await fetch("/api/models");
+    const payload = await parseResponse(response);
+    const defaultOption = modelSelect.options[0];
+    defaultOption.textContent = `默认模型（${payload.default_model}）`;
+    payload.models.forEach((model) => {
+      if (model === payload.default_model) return;
+      const option = document.createElement("option");
+      option.value = model;
+      option.textContent = model;
+      modelSelect.appendChild(option);
+    });
+    modelHint.textContent = payload.warning || "选择模型后生成 Review";
+  } catch {
+    modelHint.textContent = "模型列表加载失败，可使用默认模型。";
+  }
+}
+
 async function generateReview() {
   setBusy(true, "正在生成 review...");
   currentComments = [];
@@ -58,7 +79,7 @@ async function generateReview() {
       body: JSON.stringify({
         pr_url: prUrlInput.value.trim(),
         scm_token: scmTokenInput.value.trim() || null,
-        model: modelInput.value.trim() || null,
+        model: modelSelect.value || null,
       }),
     });
     const payload = await parseResponse(response);

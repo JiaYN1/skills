@@ -29,7 +29,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -136,7 +137,8 @@ h2 {
 
 input[type="url"],
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+select {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--border);
@@ -147,7 +149,8 @@ input[type="password"] {
   outline: none;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(28, 107, 90, 0.16);
 }
@@ -391,4 +394,3 @@ pre {
     grid-template-columns: 1fr;
   }
 }
-

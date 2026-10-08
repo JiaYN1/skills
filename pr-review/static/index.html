@@ -30,7 +30,10 @@
             </label>
             <label class="field">
               <span>模型</span>
-              <input id="model" name="model" type="text" placeholder="默认 OPENAI_MODEL" />
+              <select id="model" name="model" aria-describedby="modelHint">
+                <option value="">默认模型</option>
+              </select>
+              <span id="modelHint" role="status">正在加载模型列表…</span>
             </label>
           </div>
 
@@ -81,4 +84,3 @@
     <script src="/app.js" type="module"></script>
   </body>
 </html>
-
