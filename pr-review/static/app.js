@@ -32,6 +32,8 @@ publishButton.addEventListener("click", async () => {
 
 selectAll.addEventListener("change", () => {
   document.querySelectorAll(".comment-select:not(:disabled)").forEach((checkbox) => {
+    // 疑似重复需要逐个确认，批量全选不代劳（取消全选仍然全部取消）
+    if (selectAll.checked && checkbox.dataset.duplicateSuspect) return;
     checkbox.checked = selectAll.checked;
   });
 });
@@ -166,8 +168,10 @@ function renderComments(comments) {
     checkbox.className = "comment-select";
     checkbox.type = "checkbox";
     checkbox.value = comment.id;
-    checkbox.checked = comment.publishable;
+    // 疑似重复的意见默认不勾选，但保留勾选能力，由用户决定是否发布
+    checkbox.checked = comment.publishable && !comment.duplicate_suspect;
     checkbox.disabled = !comment.publishable;
+    if (comment.duplicate_suspect) checkbox.dataset.duplicateSuspect = "1";
 
     const main = document.createElement("div");
     main.className = "comment-main";
@@ -233,7 +237,19 @@ function renderCommentBody(comment) {
   const state = document.createElement("p");
   state.className = "publish-state";
   state.dataset.publishState = comment.id;
-  state.textContent = comment.publishable ? "待发布" : comment.publish_warning || "不可发布";
+  if (comment.already_posted) {
+    state.classList.add("already-posted");
+    state.textContent = comment.existing_url
+      ? `PR 上已存在相同意见：${comment.existing_url}`
+      : comment.publish_warning || "PR 上已存在相同意见，不再重复发布。";
+  } else if (comment.duplicate_suspect) {
+    state.classList.add("duplicate-suspect");
+    state.textContent = comment.existing_url
+      ? `疑似已提过：${comment.existing_url}（勾选后仍会发布）`
+      : `${comment.publish_warning || "PR 上可能存在相同意见。"}（勾选后仍会发布）`;
+  } else {
+    state.textContent = comment.publishable ? "待发布" : comment.publish_warning || "不可发布";
+  }
   body.appendChild(state);
 
   return body;

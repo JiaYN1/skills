@@ -37,6 +37,18 @@ class PullRequestData:
     start_sha: str | None = None
 
 
+@dataclass(slots=True)
+class ExistingComment:
+    """A review comment that already exists on the PR/MR."""
+
+    id: str
+    file_path: str
+    line: int | None
+    body: str
+    url: str | None = None
+    author: str | None = None
+
+
 def parse_pr_url(pr_url: str) -> PullRequestRef:
     parsed = urlparse(pr_url)
     if not parsed.scheme or not parsed.netloc:
@@ -87,6 +99,168 @@ def resolve_token(platform: str, explicit_token: str | None = None) -> str | Non
     if platform == "gitcode":
         return os.getenv("GITCODE_TOKEN") or os.getenv("GITLAB_TOKEN")
     return os.getenv("GITLAB_TOKEN")
+
+
+async def fetch_existing_comments(ref: PullRequestRef, token: str | None = None) -> list[ExistingComment]:
+    """Fetch the review comments already posted on the PR/MR.
+
+    Used to avoid posting the same finding twice. Raises ``ProviderError`` when
+    the platform call fails; callers treat that as best-effort and continue.
+    """
+
+    if ref.platform == "github":
+        return await _fetch_github_existing_comments(ref, token)
+    if ref.platform == "gitcode":
+        return await _fetch_gitcode_existing_comments(ref, token)
+    return await _fetch_gitlab_existing_comments(ref, token)
+
+
+async def _fetch_github_existing_comments(ref: PullRequestRef, token: str | None) -> list[ExistingComment]:
+    url = f"https://api.github.com/repos/{ref.owner}/{ref.repo}/pulls/{ref.number}/comments"
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    resolved_token = resolve_token(ref.platform, token)
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        items = await _paginate_json(
+            client, url, headers=headers, params={"per_page": 100},
+            prefix="获取 GitHub 已有 review 评论失败",
+        )
+
+    comments: list[ExistingComment] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        line = item.get("line") or item.get("original_line")
+        comments.append(
+            ExistingComment(
+                id=str(item.get("id") or ""),
+                file_path=str(item.get("path") or ""),
+                line=line if isinstance(line, int) else None,
+                body=str(item.get("body") or ""),
+                url=item.get("html_url") if isinstance(item.get("html_url"), str) else None,
+                author=_nested_str(item.get("user"), "login"),
+            )
+        )
+    return comments
+
+
+async def _fetch_gitlab_existing_comments(ref: PullRequestRef, token: str | None) -> list[ExistingComment]:
+    api_base = f"{ref.scheme}://{ref.host}/api/v4"
+    project = quote(ref.project_path, safe="")
+    url = f"{api_base}/projects/{project}/merge_requests/{ref.number}/discussions"
+    headers: dict[str, str] = {}
+    resolved_token = resolve_token(ref.platform, token)
+    if resolved_token:
+        headers["PRIVATE-TOKEN"] = resolved_token
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        discussions = await _paginate_json(
+            client, url, headers=headers, params={"per_page": 100},
+            prefix="获取 GitLab/GitCode 已有讨论失败",
+        )
+
+    comments: list[ExistingComment] = []
+    for discussion in discussions:
+        if not isinstance(discussion, dict):
+            continue
+        notes = discussion.get("notes")
+        if not isinstance(notes, list):
+            continue
+        for note in notes:
+            if not isinstance(note, dict) or note.get("system"):
+                continue
+            position = note.get("position") if isinstance(note.get("position"), dict) else {}
+            line = position.get("new_line") or position.get("old_line")
+            comments.append(
+                ExistingComment(
+                    id=str(note.get("id") or ""),
+                    file_path=str(position.get("new_path") or position.get("old_path") or ""),
+                    line=line if isinstance(line, int) else None,
+                    body=str(note.get("body") or ""),
+                    author=_nested_str(note.get("author"), "username"),
+                )
+            )
+    return comments
+
+
+async def _fetch_gitcode_existing_comments(ref: PullRequestRef, token: str | None) -> list[ExistingComment]:
+    if not ref.owner or not ref.repo:
+        raise ProviderError("GitCode PR 链接需要是 https://gitcode.com/{owner}/{repo}/pull/{number} 格式。")
+
+    owner = quote(ref.owner, safe="")
+    repo = quote(ref.repo, safe="")
+    number = quote(ref.number, safe="")
+    url = f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{number}/comments"
+    params = {**_gitcode_params(token), "per_page": 100}
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        items = await _paginate_json(
+            client, url, headers={"Accept": "application/json"}, params=params,
+            prefix="获取 GitCode 已有评论失败",
+        )
+
+    comments: list[ExistingComment] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # GitCode 的行级评论把行号放在 diff_position 里，且这个列表接口不返回文件路径
+        # （路径只出现在 reply 的 URL 参数里），因此 GitCode 上只能靠正文匹配去重。
+        diff_position = item.get("diff_position") if isinstance(item.get("diff_position"), dict) else {}
+        line = (
+            diff_position.get("start_new_line")
+            or diff_position.get("end_new_line")
+            or item.get("position")
+            or item.get("line")
+        )
+        comments.append(
+            ExistingComment(
+                id=str(item.get("id") or ""),
+                file_path=str(item.get("path") or item.get("file_path") or ""),
+                line=line if isinstance(line, int) else None,
+                body=str(item.get("body") or item.get("content") or item.get("note") or ""),
+                url=item.get("html_url") if isinstance(item.get("html_url"), str) else None,
+                author=_nested_str(item.get("user"), "login"),
+            )
+        )
+    return comments
+
+
+async def _paginate_json(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, Any],
+    prefix: str,
+    max_pages: int = 5,
+) -> list[Any]:
+    """Collect up to ``max_pages`` pages of a JSON list endpoint."""
+
+    per_page = params.get("per_page", 100)
+    items: list[Any] = []
+    for page in range(1, max_pages + 1):
+        response = await client.get(url, headers=headers, params={**params, "page": page})
+        if response.status_code >= 400:
+            _raise_provider_error(response, prefix)
+        payload = _response_json(response, prefix)
+        if not isinstance(payload, list):
+            if page == 1:
+                raise ProviderError(f"{prefix}: API 响应不是 JSON 数组。")
+            break
+        items.extend(payload)
+        if not isinstance(per_page, int) or len(payload) < per_page:
+            break
+    return items
+
+
+def _nested_str(value: Any, key: str) -> str | None:
+    if isinstance(value, dict):
+        nested = value.get(key)
+        if isinstance(nested, str):
+            return nested
+    return None
 
 
 def _parse_gitlab_url(scheme: str, host: str, parts: list[str], pr_url: str) -> PullRequestRef | None:

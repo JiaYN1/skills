@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -8,13 +9,32 @@ from typing import Any
 
 import httpx
 
-from .diff_parser import ChangedFile, render_annotated_diff
-from .providers import PullRequestData
+from .dedupe import (
+    comment_fingerprint,
+    deduplicate_within_batch,
+    mark_already_reported,
+    with_fingerprint_marker,
+)
+from .diff_parser import (
+    ChangedFile,
+    assign_line_anchors,
+    render_annotated_diff,
+    render_file_annotated_diff,
+)
+from .providers import ExistingComment, PullRequestData
 from .schemas import ReviewComment, ReviewSummary
+from .strategy import (
+    ReviewPlan,
+    build_review_plan,
+    large_pr_concurrency,
+    per_file_max_chars,
+    skip_summary,
+)
 
 
 CATEGORIES = {"性能", "设计", "安全", "可维护性", "错误处理", "测试", "规范", "逻辑"}
 SEVERITIES = {"严重", "建议", "规范"}
+_NO_DIFF_MESSAGE = "没有可审查的文本 diff。"
 
 
 class ReviewError(RuntimeError):
@@ -88,20 +108,128 @@ SYSTEM_PROMPT = """你是一个严谨的 PR 代码审查助手。你只审查给
 10. 只输出符合 JSON schema 的 JSON，不要输出 Markdown。"""
 
 
-async def generate_review(data: PullRequestData, model: str | None = None) -> tuple[list[ReviewComment], ReviewSummary, list[str]]:
-    max_diff_chars = int(os.getenv("MAX_DIFF_CHARS", "120000"))
-    annotated_diff, warnings = render_annotated_diff(data.files, max_chars=max_diff_chars)
+async def generate_review(
+    data: PullRequestData,
+    model: str | None = None,
+    existing: list[ExistingComment] | None = None,
+) -> tuple[list[ReviewComment], ReviewSummary, list[str]]:
+    """Generate review comments for a PR.
+
+    Containers whose diff exceeds ``LARGE_PR_DIFF_LINES`` are reviewed one file
+    at a time, most important files first. Comments that already exist on the
+    PR are returned flagged: exact matches as ``already_posted`` (never
+    published twice), look-alikes as ``duplicate_suspect`` (the page lets the
+    user decide whether to send them).
+    """
+
+    plan = build_review_plan(data.files)
+    if not plan.selected:
+        return [], _empty_summary(), [_NO_DIFF_MESSAGE]
+
+    if plan.large:
+        comments, warnings = await _generate_large_review(data, plan, model=model)
+    else:
+        comments, warnings = await _generate_single_review(data, plan, model=model)
+
+    comments = deduplicate_within_batch(comments)
+    comments, duplicates, suspects = mark_already_reported(comments, existing or [])
+    if duplicates:
+        warnings.append(
+            f"其中 {len(duplicates)} 条意见已存在于该 PR/MR，已标记为不重复发布。"
+        )
+    if suspects:
+        warnings.append(
+            f"其中 {len(suspects)} 条意见可能与已有意见重复，已标记待确认（默认不勾选，可手动勾选后发布）。"
+        )
+
+    return comments, _build_summary(comments), warnings
+
+
+async def _generate_single_review(
+    data: PullRequestData,
+    plan: ReviewPlan,
+    model: str | None,
+) -> tuple[list[ReviewComment], list[str]]:
+    annotated_diff, warnings = render_annotated_diff(plan.selected, max_chars=_max_diff_chars())
     if not annotated_diff.strip():
-        summary = ReviewSummary(total=0, severe=0, suggestion=0, style=0, text="总结：共发现 0 个问题（严重 0 个，建议 0 个，规范 0 个）")
-        return [], summary, ["没有可审查的文本 diff。"]
+        return [], [*warnings, _NO_DIFF_MESSAGE]
 
     raw_result = await _call_llm(data, annotated_diff, model=model)
-    comments = _normalize_comments(raw_result.get("comments", []), data.files)
-    summary = _build_summary(comments)
-    return comments, summary, warnings
+    return _normalize_comments(raw_result.get("comments", []), plan.selected), warnings
 
 
-async def _call_llm(data: PullRequestData, annotated_diff: str, model: str | None) -> dict[str, Any]:
+async def _generate_large_review(
+    data: PullRequestData,
+    plan: ReviewPlan,
+    model: str | None,
+) -> tuple[list[ReviewComment], list[str]]:
+    warnings = [_large_pr_notice(plan)]
+    skipped_notice = skip_summary(plan)
+    if skipped_notice:
+        warnings.append(skipped_notice.lstrip("；"))
+
+    assign_line_anchors(plan.selected)
+    budget = per_file_max_chars()
+    semaphore = asyncio.Semaphore(large_pr_concurrency())
+
+    async def review_one(file: ChangedFile) -> tuple[list[ReviewComment], list[str], str | None]:
+        async with semaphore:
+            annotated_diff, file_warnings = render_file_annotated_diff(file, budget)
+            if not annotated_diff.strip():
+                return [], file_warnings, None
+            try:
+                raw_result = await _call_llm(data, annotated_diff, model=model, focus_path=file.new_path)
+            except ReviewError as exc:
+                return [], file_warnings, f"{file.new_path} 审查失败，已跳过该文件：{exc}"
+            return _normalize_comments(raw_result.get("comments", []), [file]), file_warnings, None
+
+    results = await asyncio.gather(*(review_one(file) for file in plan.selected))
+
+    comments: list[ReviewComment] = []
+    for file_comments, file_warnings, error in results:
+        comments.extend(file_comments)
+        warnings.extend(file_warnings)
+        if error:
+            warnings.append(error)
+    return comments, warnings
+
+
+def _large_pr_notice(plan: ReviewPlan) -> str:
+    details = "、".join(
+        f"{path}（{plan.selected_tiers.get(path, '业务代码')}）" for path in plan.selected_paths
+    )
+    return (
+        f"检测到大 PR：本次变更 {plan.changed_lines} 行（阈值 {plan.threshold} 行），"
+        f"已改为逐文件检视最关键的 {len(plan.selected)} 个文件：{details}。"
+    )
+
+
+def _empty_summary() -> ReviewSummary:
+    return ReviewSummary(
+        total=0,
+        severe=0,
+        suggestion=0,
+        style=0,
+        text="总结：共发现 0 个问题（严重 0 个，建议 0 个，规范 0 个）",
+    )
+
+
+def _max_diff_chars() -> int:
+    raw = os.getenv("MAX_DIFF_CHARS", "").strip()
+    if not raw:
+        return 120000
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return 120000
+
+
+async def _call_llm(
+    data: PullRequestData,
+    annotated_diff: str,
+    model: str | None,
+    focus_path: str | None = None,
+) -> dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ReviewError("未配置 OPENAI_API_KEY，无法生成自动 review。")
@@ -109,7 +237,7 @@ async def _call_llm(data: PullRequestData, annotated_diff: str, model: str | Non
     selected_model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
-    user_prompt = _build_user_prompt(data, annotated_diff)
+    user_prompt = _build_user_prompt(data, annotated_diff, focus_path=focus_path)
 
     payload: dict[str, Any] = {
         "model": selected_model,
@@ -147,7 +275,8 @@ async def _call_llm(data: PullRequestData, annotated_diff: str, model: str | Non
     return _parse_json_content(content)
 
 
-def _build_user_prompt(data: PullRequestData, annotated_diff: str) -> str:
+def _build_user_prompt(data: PullRequestData, annotated_diff: str, focus_path: str | None = None) -> str:
+    scope = f"本次只审查文件: {focus_path}\n\n" if focus_path else ""
     return f"""请审查以下 PR diff，并返回结构化 JSON。
 
 PR: {data.ref.web_url}
@@ -155,13 +284,19 @@ PR: {data.ref.web_url}
 仓库: {data.ref.project_path}
 标题: {data.title or ""}
 
-说明：
+{scope}说明：
 - diff 中只有带 `[anchor:<值>]` 的行可以发布行级评论。
 - line 必须以同一行的 `[new:<数字>]` 为准；不要使用 hunk 序号、old 行号、当前磁盘文件行号或相对偏移。
 - 每条 comment 必须同时填写 `line_anchor` 和对应的 `line`。
-
+{_focus_hint(focus_path)}
 {annotated_diff}
 """
+
+
+def _focus_hint(focus_path: str | None) -> str:
+    if not focus_path:
+        return ""
+    return f"- 只报告 `{focus_path}` 内的问题，不要评论其他文件。\n"
 
 
 def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedFile]) -> list[ReviewComment]:
@@ -214,7 +349,7 @@ def _normalize_comments(raw_comments: list[dict[str, Any]], files: list[ChangedF
         elif not publishable:
             publish_warning = "该行不在 PR diff 的可评论新行中，只能展示，不能自动发布。"
 
-        body = _format_review_body(
+        body = format_review_body(
             file_path=file_path,
             line=line,
             category=category,
@@ -253,7 +388,7 @@ def _build_summary(comments: list[ReviewComment]) -> ReviewSummary:
     return ReviewSummary(total=total, severe=severe, suggestion=suggestion, style=style, text=text)
 
 
-def _format_review_body(
+def format_review_body(
     *,
     file_path: str,
     line: int,
@@ -263,12 +398,13 @@ def _format_review_body(
     language: str,
     code_example: str,
 ) -> str:
-    return (
+    body = (
         f"【review】【{category}】 `{file_path}` 第 {line} 行\n\n"
         f"问题：{message}\n\n"
         f"修改建议：{suggestion}\n\n"
         f"```{language}\n{code_example}\n```"
     )
+    return with_fingerprint_marker(body, comment_fingerprint(file_path, category, message))
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:

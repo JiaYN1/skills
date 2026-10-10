@@ -4,8 +4,17 @@ from urllib.parse import quote
 
 import httpx
 
+from .dedupe import comment_fingerprint_of, mark_already_reported, with_fingerprint_marker
 from .diff_parser import ChangedFile
-from .providers import ProviderError, fetch_pull_request, parse_pr_url, resolve_token
+from .providers import (
+    ProviderError,
+    PullRequestRef,
+    fetch_existing_comments,
+    fetch_pull_request,
+    parse_pr_url,
+    resolve_token,
+)
+from .reviewer import format_review_body
 from .schemas import PublishItemResult, ReviewComment
 
 
@@ -35,6 +44,20 @@ async def publish_comments(pr_url: str, comments: list[ReviewComment], token: st
     if not resolved_token:
         raise PublishError("发布评论需要配置对应平台 token，或在请求中提供 scm_token。")
 
+    publishable, duplicates = await _drop_already_published(ref, publishable, resolved_token)
+    duplicate_results = [
+        PublishItemResult(
+            id=comment.id,
+            file_path=comment.file_path,
+            line=comment.line,
+            status="skipped",
+            error=comment.publish_warning or "PR 上已存在相同意见，不再重复发布。",
+        )
+        for comment in duplicates
+    ]
+    if not publishable:
+        return duplicate_results + skipped
+
     if ref.platform == "github":
         results = await _publish_github_comments(pr_url, publishable, resolved_token)
     elif ref.platform == "gitcode":
@@ -42,7 +65,43 @@ async def publish_comments(pr_url: str, comments: list[ReviewComment], token: st
     else:
         results = await _publish_gitlab_comments(pr_url, publishable, resolved_token)
 
-    return results + skipped
+    return results + duplicate_results + skipped
+
+
+async def _drop_already_published(
+    ref: PullRequestRef, comments: list[ReviewComment], token: str
+) -> tuple[list[ReviewComment], list[ReviewComment]]:
+    """Re-check the PR right before publishing, so a stale page cannot repost.
+
+    Only exact matches are dropped here: comments the page marked as suspected
+    duplicates stay, because selecting them is an explicit user decision.
+    """
+
+    try:
+        existing = await fetch_existing_comments(ref, token=token)
+    except (ProviderError, httpx.HTTPError):
+        return list(comments), []
+
+    updated, duplicates, _ = mark_already_reported(comments, existing, include_similar=False)
+    fresh = [comment for comment in updated if not comment.already_posted]
+    return fresh, duplicates
+
+
+def _publish_body(comment: ReviewComment) -> str:
+    """Body posted to the platform, always carrying the fingerprint marker."""
+
+    body = (comment.body or "").strip()
+    if not body:
+        body = format_review_body(
+            file_path=comment.file_path,
+            line=comment.line,
+            category=comment.category,
+            message=comment.message,
+            suggestion=comment.suggestion,
+            language=comment.language,
+            code_example=comment.code_example,
+        )
+    return with_fingerprint_marker(body, comment_fingerprint_of(comment))
 
 
 async def _publish_github_comments(pr_url: str, comments: list[ReviewComment], token: str) -> list[PublishItemResult]:
@@ -65,7 +124,7 @@ async def _publish_github_comments(pr_url: str, comments: list[ReviewComment], t
                 "path": comment.file_path,
                 "line": comment.line,
                 "side": comment.side,
-                "body": comment.body,
+                "body": _publish_body(comment),
             }
             for comment in comments
         ],
@@ -139,7 +198,7 @@ async def _publish_gitcode_comments(pr_url: str, comments: list[ReviewComment], 
                 continue
 
             payload = {
-                "body": comment.body,
+                "body": _publish_body(comment),
                 "path": comment.file_path,
                 "position": position,
                 "need_to_resolve": False,
@@ -184,7 +243,7 @@ async def _publish_gitlab_comments(pr_url: str, comments: list[ReviewComment], t
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         for comment in comments:
             payload = {
-                "body": comment.body,
+                "body": _publish_body(comment),
                 "position": {
                     "position_type": "text",
                     "base_sha": version["base_sha"],

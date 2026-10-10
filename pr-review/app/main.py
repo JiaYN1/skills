@@ -13,7 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .providers import ProviderError, PullRequestData, fetch_pull_request
+from .providers import (
+    ExistingComment,
+    ProviderError,
+    PullRequestData,
+    PullRequestRef,
+    fetch_existing_comments,
+    fetch_pull_request,
+)
 from .publisher import PublishError, publish_comments
 from .reviewer import ReviewError, generate_review
 from .schemas import LoginRequest, PublishRequest, PublishResponse, PullRequestInfo, ReviewRequest, ReviewResponse
@@ -123,12 +130,17 @@ async def logout(response: Response) -> dict[str, str]:
 async def review_pr(request: ReviewRequest) -> ReviewResponse:
     try:
         data = await fetch_pull_request(request.pr_url, token=request.scm_token)
-        comments, summary, warnings = await generate_review(data, model=request.model)
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    existing, existing_warning = await _load_existing_comments(data.ref, request.scm_token)
+    try:
+        comments, summary, warnings = await generate_review(data, model=request.model, existing=existing)
     except ReviewError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if existing_warning:
+        warnings = [*warnings, existing_warning]
     return ReviewResponse(pr=_pull_request_info(data), comments=comments, summary=summary, warnings=warnings)
 
 
@@ -139,6 +151,17 @@ async def publish_review_comments(request: PublishRequest) -> PublishResponse:
     except (ProviderError, PublishError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return PublishResponse(results=results)
+
+
+async def _load_existing_comments(
+    ref: PullRequestRef, token: str | None
+) -> tuple[list[ExistingComment], str | None]:
+    """Best-effort fetch of the comments already posted on the PR/MR."""
+
+    try:
+        return await fetch_existing_comments(ref, token=token), None
+    except ProviderError:
+        return [], "无法读取 PR 上已有的 review 意见，本次不做重复校验。"
 
 
 def _pull_request_info(data: PullRequestData) -> PullRequestInfo:

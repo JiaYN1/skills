@@ -145,6 +145,25 @@ def render_annotated_diff(files: list[ChangedFile], max_chars: int) -> tuple[str
     return text, warnings
 
 
+def render_file_annotated_diff(file: ChangedFile, max_chars: int) -> tuple[str, list[str]]:
+    """Render a single file for one per-file review call.
+
+    Anchors must already be assigned by ``assign_line_anchors`` (the counter is
+    global across files, so anchor values stay unique in per-file mode too).
+    Anchors that do not survive truncation are pruned, so a comment can never
+    reference an anchor the model never saw.
+    """
+
+    warnings: list[str] = []
+    text = _render_annotated_files([file])
+    if len(text) > max_chars:
+        warnings.append(f"{file.new_path} 的 diff 超过 {max_chars} 字符，已截断后审查。")
+        text = _truncate_annotated_diff(text, max_chars)
+
+    prune_line_anchors([file], text)
+    return text, warnings
+
+
 def _render_annotated_files(files: list[ChangedFile]) -> str:
     if not files:
         return ""

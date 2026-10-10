@@ -32,6 +32,10 @@ class ReviewComment(BaseModel):
     body: str = ""
     publishable: bool = True
     publish_warning: str | None = None
+    already_posted: bool = False
+    existing_url: str | None = None
+    duplicate_suspect: bool = False
+    duplicate_score: float | None = None
 
 
 class ReviewSummary(BaseModel):

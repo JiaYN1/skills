@@ -366,6 +366,15 @@ pre {
   color: var(--red);
 }
 
+.publish-state.already-posted {
+  color: var(--amber);
+}
+
+.publish-state.duplicate-suspect {
+  color: var(--amber);
+  font-style: italic;
+}
+
 .publish-state.published {
   color: var(--accent-strong);
 }
