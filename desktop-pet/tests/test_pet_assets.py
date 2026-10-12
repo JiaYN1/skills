@@ -202,5 +202,197 @@ class PetAssetTests(unittest.TestCase):
         self.assertEqual(len(frames), 1)
 
 
+BODY = (200, 120, 60, 255)
+LEG = (120, 80, 40, 255)
+MARKER = (0, 0, 255, 255)
+
+TORSO_WIDTH = 280
+TORSO_HEIGHT = 320
+MARKER_OFFSET = 90
+MARKER_SIZE = 100
+
+
+def _pose_frame(path, width, height, leg=None, origin=20):
+    """Build a frame whose torso and blue marker never move between poses.
+
+    Only ``leg`` and the torso ``origin`` change, which is exactly what a walk
+    cycle does: the subject's bounding box grows and shifts while the body
+    itself keeps the same size, shape, and position.
+    """
+
+    from PIL import ImageDraw
+
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((origin, 0, origin + TORSO_WIDTH - 1, TORSO_HEIGHT - 1), fill=BODY)
+    draw.rectangle(
+        (origin + MARKER_OFFSET, 100, origin + MARKER_OFFSET + MARKER_SIZE - 1, 199),
+        fill=MARKER,
+    )
+    if leg:
+        draw.rectangle(leg, fill=LEG)
+    image.save(path)
+    return path
+
+
+# Four poses of one cycle, all on the same source canvas the image model is
+# asked for, so the sequence really is registrable. Every limb is thin enough
+# that it must not be mistaken for the body, every source is larger than the
+# target extent so a per-frame fit would visibly rescale the pet, and the last
+# pose shifts the whole subject inside its canvas so alignment has to recover a
+# translation as well as a growth.
+STABILITY_POSES = [
+    ((400, 400), (301, 230, 399, 319), 20),  # limb reaching right
+    ((400, 400), None, 20),  # compact body
+    ((400, 400), (100, 320, 140, 379), 20),  # paw stepping below the body
+    ((400, 400), (20, 230, 99, 319), 100),  # limb reaching left, subject shifted
+]
+
+
+def _marker_box(path):
+    """Return the canvas box of the opaque blue body marker.
+
+    The alpha channel is part of the test on purpose: resampling leaves stray
+    ``(0, 0, 255, 1)`` pixels along the marker edge, and those must not be
+    mistaken for the marker itself.
+    """
+
+    from PIL import ImageChops
+
+    with Image.open(path) as frame:
+        red, _green, blue, alpha = frame.convert("RGBA").split()
+        marker = ImageChops.multiply(
+            ImageChops.multiply(
+                blue.point(lambda value: 255 if value > 200 else 0),
+                red.point(lambda value: 255 if value < 60 else 0),
+            ),
+            alpha.point(lambda value: 255 if value > 200 else 0),
+        )
+        return marker.getbbox()
+
+
+@unittest.skipIf(Image is None, "Pillow 未安装")
+class SequenceStabilityTests(unittest.TestCase):
+    """Frame-to-frame stability is the whole point of sequence normalization."""
+
+    def _normalize(self, root, poses=STABILITY_POSES):
+        root.mkdir(parents=True, exist_ok=True)
+        sources = [
+            _pose_frame(root / f"pose-{index}.png", *size, leg=leg, origin=origin)
+            for index, (size, leg, origin) in enumerate(poses)
+        ]
+        destinations = [root / f"out-{index}.png" for index in range(len(sources))]
+        normalize_pet_sequence(
+            sources,
+            destinations,
+            canvas_size=320,
+            background_mode="none",
+            anchor="bottom",
+            subject_scale=0.96,
+        )
+        return destinations
+
+    def test_stretched_limb_does_not_rescale_the_body(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destinations = self._normalize(Path(temporary))
+            boxes = [_marker_box(path) for path in destinations]
+
+            widths = {box[2] - box[0] for box in boxes}
+            heights = {box[3] - box[1] for box in boxes}
+
+            self.assertLessEqual(max(widths) - min(widths), 1, f"body width jittered: {boxes}")
+            self.assertLessEqual(max(heights) - min(heights), 1, f"body height jittered: {boxes}")
+
+    def test_stretched_limb_does_not_slide_or_bob_the_body(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destinations = self._normalize(Path(temporary))
+            boxes = [_marker_box(path) for path in destinations]
+
+            centers_x = {(box[0] + box[2]) / 2 for box in boxes}
+            centers_y = {(box[1] + box[3]) / 2 for box in boxes}
+
+            self.assertLessEqual(max(centers_x) - min(centers_x), 1, f"body slid: {boxes}")
+            self.assertLessEqual(max(centers_y) - min(centers_y), 1, f"body bobbed: {boxes}")
+
+    def test_body_keeps_a_legible_share_of_the_canvas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destinations = self._normalize(Path(temporary))
+
+            for path in destinations:
+                box = _marker_box(path)
+                with Image.open(path) as frame:
+                    self.assertGreater(box[2] - box[0], frame.width * 0.15)
+
+    def test_sequence_output_never_leaves_the_canvas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destinations = self._normalize(Path(temporary))
+
+            for path in destinations:
+                with Image.open(path) as frame:
+                    self.assertEqual(frame.size, (320, 320))
+                    bbox = frame.convert("RGBA").getchannel("A").getbbox()
+                    self.assertGreaterEqual(bbox[0], 0)
+                    self.assertGreaterEqual(bbox[1], 0)
+                    self.assertLessEqual(bbox[2], 320)
+                    self.assertLessEqual(bbox[3], 320)
+
+    def test_mixed_source_sizes_fall_back_to_per_frame_anchoring(self):
+        """Frames that share no source canvas still share one render scale.
+
+        Loose still photos of different sizes cannot be registered against each
+        other, so each frame must be anchored by its own alpha box instead of by
+        a translation computed from unrelated images.
+        """
+
+        poses = [
+            ((400, 320), (301, 230, 399, 319), 20),  # limb reaching right
+            ((500, 500), None, 20),  # a photo with a different canvas size
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            destinations = self._normalize(Path(temporary), poses=poses)
+            boxes = [_marker_box(path) for path in destinations]
+
+            widths = {box[2] - box[0] for box in boxes}
+            centers_x = {(box[0] + box[2]) / 2 for box in boxes}
+            centers_y = {(box[1] + box[3]) / 2 for box in boxes}
+
+            self.assertLessEqual(max(widths) - min(widths), 1, f"body width jittered: {boxes}")
+            self.assertLessEqual(
+                max(centers_x) - min(centers_x), 1, f"body slid: {boxes}"
+            )
+            self.assertLessEqual(
+                max(centers_y) - min(centers_y), 1, f"body bobbed: {boxes}"
+            )
+
+    def test_homogeneous_sequence_does_not_depend_on_the_frame_count(self):
+        """Repeating one pose must not change its scale or its placement.
+
+        This is the contract behind "one scale for the whole sequence": adding
+        more frames of the same size may not resize or move the pet, otherwise
+        every extra frame would reintroduce the jitter this module removes.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            one = self._normalize(root / "one", poses=[STABILITY_POSES[1]])
+            three = self._normalize(root / "three", poses=[STABILITY_POSES[1]] * 3)
+
+            single = _marker_box(one[0])
+            repeated = [_marker_box(path) for path in three]
+
+            self.assertEqual(
+                {abs(box[2] - box[0]) for box in repeated} | {single[2] - single[0]},
+                {single[2] - single[0]},
+                f"repeating a pose changed its size: {single} {repeated}",
+            )
+            for box in repeated:
+                self.assertLessEqual(
+                    abs(box[0] - single[0]) + abs(box[1] - single[1]),
+                    1,
+                    f"repeating a pose moved it: {single} {repeated}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

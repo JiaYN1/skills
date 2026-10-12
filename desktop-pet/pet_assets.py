@@ -8,7 +8,7 @@ only uses Pillow here for alpha cleanup, cropping, and frame alignment.
 from collections import deque
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 
 def _clean_alpha_edges(image, minimum_alpha: int = 8):
@@ -366,16 +366,178 @@ def split_contact_sheet_bytes(image_bytes: bytes, frame_count: int) -> List[byte
         return [image_bytes]
 
 
-def _paste_subject(canvas, image, padding: int, anchor: str):
-    left = (canvas.width - image.width) // 2
-    normalized_anchor = str(anchor or "center").strip().lower()
-    if normalized_anchor in {"bottom", "baseline", "bottom-center"}:
-        top = canvas.height - padding - image.height
-    elif normalized_anchor == "top":
-        top = padding
-    else:
-        top = (canvas.height - image.height) // 2
-    canvas.alpha_composite(image, (left, top))
+CANVAS_MARGIN = 1
+MAX_UPSCALE = 2.0
+ALIGN_COARSE_SIZE = 48
+ALIGN_COARSE_RADIUS = 8
+ALIGN_FINE_SIZE = 256
+ALIGN_FINE_RADIUS = 6
+
+
+def _median(values: Sequence[float]) -> float:
+    """Return the median of a small numeric sequence."""
+
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _working_alpha(alpha, work_size: int):
+    """Return a box-averaged alpha copy for cheap overlap scoring.
+
+    The box filter preserves mass, so overlap scores computed on the working
+    copy rank candidate offsets the same way the full-resolution masks would.
+    """
+
+    from PIL import Image
+
+    factor = max(alpha.width, alpha.height) / float(max(1, work_size))
+    if factor <= 1.0:
+        return alpha, 1.0
+    size = (max(1, round(alpha.width / factor)), max(1, round(alpha.height / factor)))
+    return alpha.resize(size, Image.Resampling.BOX), factor
+
+
+def _overlap_cost(reference, moving, dx: int, dy: int) -> float:
+    """Return the mean absolute alpha difference after shifting ``moving``."""
+
+    from PIL import Image, ImageChops, ImageStat
+
+    shifted = Image.new("L", reference.size, 0)
+    shifted.paste(moving, (dx, dy))
+    return float(ImageStat.Stat(ImageChops.difference(reference, shifted)).mean[0])
+
+
+def _parabolic_peak(reference, moving, offset: Tuple[int, int], axis: int) -> float:
+    """Return a sub-pixel correction for the best overlap offset.
+
+    An integer search alone quantizes the alignment to one working pixel, which
+    is several source pixels wide and therefore visible as a small body shift.
+    Fitting a parabola through the cost at the optimum and its two neighbours
+    recovers the sub-pixel minimum.
+    """
+
+    step = (1, 0) if axis == 0 else (0, 1)
+    before = _overlap_cost(
+        reference, moving, offset[0] - step[0], offset[1] - step[1]
+    )
+    middle = _overlap_cost(reference, moving, offset[0], offset[1])
+    after = _overlap_cost(reference, moving, offset[0] + step[0], offset[1] + step[1])
+    denominator = before - 2.0 * middle + after
+    if denominator <= 0:
+        return 0.0
+    return max(-0.5, min(0.5, 0.5 * (before - after) / denominator))
+
+
+def _best_overlap_offset(reference, moving, radius: int, center: Tuple[int, int]):
+    """Return the offset that overlaps ``moving`` on ``reference`` best.
+
+    Scoring the alpha overlap is dominated by the body, because a torso covers
+    far more pixels than a leg or a tail. That makes overlap a stable alignment
+    signal even while the limbs swing, unlike a bounding box whose center and
+    bottom follow the limbs.
+    """
+
+    best_offset = (0, 0)
+    best_score = None
+    for dy in range(center[1] - radius, center[1] + radius + 1):
+        for dx in range(center[0] - radius, center[0] + radius + 1):
+            score = _overlap_cost(reference, moving, dx, dy)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_offset = (dx, dy)
+    return (
+        best_offset[0] + _parabolic_peak(reference, moving, best_offset, 0),
+        best_offset[1] + _parabolic_peak(reference, moving, best_offset, 1),
+    )
+
+
+def _sequence_alignments(
+    masks: Sequence[Any],
+    boxes: Sequence[Tuple[int, int, int, int]],
+    align: bool = True,
+):
+    """Return per-frame source-pixel offsets that align the sequence, plus the
+    reference frame index.
+
+    Offsets are measured in the source coordinate frame (not inside each tight
+    crop, where every frame would look centered), by maximizing the alpha
+    overlap against the median-area reference pose. Overlap is dominated by the
+    torso, so a swinging leg or tail barely moves the result, while a bounding
+    box follows the limbs exactly.
+
+    ``align=False`` is for callers whose frames have no shared source canvas
+    (loose still photos of different sizes): there is nothing to register them
+    against, so each frame is anchored by its own alpha box instead, which keeps
+    the shared scale without inventing a translation out of unrelated photos.
+    """
+
+    from PIL import Image
+
+    areas = [(box[2] - box[0]) * (box[3] - box[1]) for box in boxes]
+    reference_index = min(
+        range(len(areas)),
+        key=lambda index: abs(areas[index] - _median(areas)),
+    )
+    if not align:
+        reference_box = boxes[reference_index]
+        return [
+            (reference_box[0] - box[0], reference_box[1] - box[1]) for box in boxes
+        ], reference_index
+    if len(masks) < 2:
+        return [(0, 0) for _ in masks], reference_index
+
+    extent = (
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+    absolute: List[Any] = []
+    for mask, box in zip(masks, boxes):
+        layer = Image.new("L", extent, 0)
+        layer.paste(mask, (box[0], box[1]))
+        absolute.append(layer)
+
+    offsets: List[Tuple[int, int]] = [(0, 0) for _ in masks]
+    coarse_reference, coarse_factor = _working_alpha(absolute[reference_index], ALIGN_COARSE_SIZE)
+    fine_reference, fine_factor = _working_alpha(absolute[reference_index], ALIGN_FINE_SIZE)
+    reference_box = boxes[reference_index]
+    reference_center = (
+        (reference_box[0] + reference_box[2]) / 2.0,
+        (reference_box[1] + reference_box[3]) / 2.0,
+    )
+
+    for index, mask in enumerate(absolute):
+        if index == reference_index:
+            continue
+        box = boxes[index]
+        # The silhouette center is only a starting guess: it is off by half of
+        # whatever a limb adds to the silhouette, which the overlap search then
+        # corrects.
+        guess = (
+            round((reference_center[0] - (box[0] + box[2]) / 2.0) / coarse_factor),
+            round((reference_center[1] - (box[1] + box[3]) / 2.0) / coarse_factor),
+        )
+        coarse, _ = _working_alpha(mask, ALIGN_COARSE_SIZE)
+        coarse_offset = _best_overlap_offset(
+            coarse_reference, coarse, ALIGN_COARSE_RADIUS, guess
+        )
+        fine, _ = _working_alpha(mask, ALIGN_FINE_SIZE)
+        fine_center = (
+            round(coarse_offset[0] * coarse_factor / fine_factor),
+            round(coarse_offset[1] * coarse_factor / fine_factor),
+        )
+        fine_offset = _best_overlap_offset(
+            fine_reference, fine, ALIGN_FINE_RADIUS, fine_center
+        )
+        offsets[index] = (
+            int(round(fine_offset[0] * fine_factor)),
+            int(round(fine_offset[1] * fine_factor)),
+        )
+    return offsets, reference_index
 
 
 def normalize_pet_image(
@@ -414,7 +576,14 @@ def _prepare_subject(
     background_mode: Optional[str],
     require_transparency: bool,
 ):
-    """Read, orient, segment, and crop one source without resizing it."""
+    """Read, orient, segment, and crop one source without resizing it.
+
+    Returns the cropped subject, its box in the source image, and the source
+    size. Sequence alignment needs the box so it can work in one shared source
+    coordinate frame instead of per-frame crop coordinates (where every frame
+    looks centered), and the size so it can tell whether the frames really do
+    share a canvas.
+    """
 
     from PIL import Image, ImageOps
 
@@ -432,7 +601,7 @@ def _prepare_subject(
     bbox = image.getchannel("A").getbbox()
     if not bbox:
         raise ValueError(f"无法从照片中读取有效主体: {source_path}")
-    return image.crop(bbox)
+    return image.crop(bbox), bbox, image.size
 
 
 def normalize_pet_sequence(
@@ -446,10 +615,29 @@ def normalize_pet_sequence(
 ) -> None:
     """Normalize a complete action sequence with one shared render contract.
 
-    Every frame is segmented before it is resized, then rendered to the same
-    square canvas, subject extent, horizontal center, and optional baseline.
-    Processing the sequence together prevents per-frame padding and placement
-    decisions from becoming another source of motion jitter.
+    Every frame is segmented, then the whole sequence is measured together
+    before anything is written, because the image model is not asked for
+    pixel-exact frame alignment. Three rules keep the pet from jittering:
+
+    1. **One scale for the whole sequence.** Scaling each frame so that its own
+       bounding box fits a target extent makes the pet grow and shrink whenever
+       a leg or a tail stretches that box, which a side-view walk cycle does on
+       almost every frame. The scale here is the median fit of the sequence, and
+       it is only ever reduced as one global factor, so every frame keeps the
+       same body size.
+    2. **Alignment by overlap, not by bounding box.** The bounding box bottom
+       is the lowest paw of that frame and its center moves with the limbs, so
+       anchoring on it bobs and slides the torso inside the canvas. Each frame is
+       instead registered onto the median-area reference frame by maximizing
+       alpha overlap (``_sequence_alignments``), which is dominated by the body.
+    3. **One global placement.** The anchor decides where the reference frame
+       sits; every other frame reuses that placement plus its own registration
+       offset. Overflow is corrected by shifting or scaling the entire sequence
+       together, never a single frame.
+
+    A frame whose pose is a genuine outlier for the sequence can therefore end up
+    clipped at the canvas edge, but it is never rescaled or nudged on its own:
+    deleting or regenerating such a frame is a QA decision, not a scaling one.
     """
 
     from PIL import Image
@@ -463,21 +651,105 @@ def normalize_pet_sequence(
         _prepare_subject(path, background_mode, require_transparency)
         for path in source_paths
     ]
+    if not prepared:
+        return
+
     padding = max(4, int(canvas_size * 0.08))
     try:
-        scale = float(subject_scale)
+        subject_scale_value = float(subject_scale)
     except (TypeError, ValueError):
-        scale = 1.0
-    scale = max(0.5, min(1.0, scale))
+        subject_scale_value = 1.0
+    subject_scale_value = max(0.5, min(1.0, subject_scale_value))
 
-    # Use one target extent for the whole sequence: no frame is allowed to
-    # choose its own crop scale or padding.
-    target_extent = max(1, round((canvas_size - padding * 2) * scale))
+    target_extent = max(1, round((canvas_size - padding * 2) * subject_scale_value))
 
-    for source, destination in zip(prepared, destination_paths):
-        image = source.copy()
-        image.thumbnail((target_extent, target_extent), Image.Resampling.LANCZOS)
+    normalized_anchor = str(anchor or "center").strip().lower()
+    bottom_anchor = normalized_anchor in {"bottom", "baseline", "bottom-center"}
+    top_anchor = normalized_anchor == "top"
+
+    images = [image for image, _box, _size in prepared]
+    boxes = [box for _image, box, _size in prepared]
+    source_sizes = {size for _image, _box, size in prepared}
+    masks = [image.getchannel("A") for image in images]
+    # Generated action frames all arrive on one shared 1024x1024 canvas, where
+    # registration is meaningful. Loose still photos of unrelated sizes have no
+    # shared frame to align in, so they only get the shared scale.
+    alignments, reference_index = _sequence_alignments(
+        masks, boxes, align=len(source_sizes) == 1
+    )
+    reference_box = boxes[reference_index]
+
+    # One render scale for every frame: the median pose defines how large the
+    # pet should be, and a small source photo is never blown up into mush.
+    fit_scale = _median(
+        [
+            target_extent / max(1, max(box[2] - box[0], box[3] - box[1]))
+            for box in boxes
+        ]
+    )
+    render_scale = max(0.01, min(fit_scale, MAX_UPSCALE))
+
+    def place_all(scale: float):
+        reference_width = max(1, round((reference_box[2] - reference_box[0]) * scale))
+        reference_height = max(1, round((reference_box[3] - reference_box[1]) * scale))
+        base_left = (canvas_size - reference_width) // 2
+        if bottom_anchor:
+            base_top = canvas_size - padding - reference_height
+        elif top_anchor:
+            base_top = padding
+        else:
+            base_top = (canvas_size - reference_height) // 2
+        placements = []
+        for index, box in enumerate(boxes):
+            width = max(1, round((box[2] - box[0]) * scale))
+            height = max(1, round((box[3] - box[1]) * scale))
+            # The reference frame defines the canvas mapping; every other frame
+            # is that same mapping plus its own overlap-registration offset.
+            left = base_left + round(
+                (box[0] + alignments[index][0] - reference_box[0]) * scale
+            )
+            top = base_top + round(
+                (box[1] + alignments[index][1] - reference_box[1]) * scale
+            )
+            placements.append((left, top, width, height))
+        lefts = [item[0] for item in placements]
+        tops = [item[1] for item in placements]
+        rights = [item[0] + item[2] for item in placements]
+        bottoms = [item[1] + item[3] for item in placements]
+        return placements, (min(lefts), min(tops), max(rights), max(bottoms))
+
+    # A single stretched pose can make the whole sequence too large to fit at
+    # the median scale. Shrink everything by one shared factor instead of
+    # shrinking the outlier alone.
+    for _ in range(3):
+        placements, union = place_all(render_scale)
+        union_width = union[2] - union[0]
+        union_height = union[3] - union[1]
+        available = canvas_size - CANVAS_MARGIN * 2
+        if union_width <= available and union_height <= available:
+            break
+        render_scale *= available / max(1, union_width, union_height)
+        render_scale = max(0.01, render_scale)
+
+    placements, union = place_all(render_scale)
+    # Keep the sequence inside the canvas with one shared nudge, preserving the
+    # relative placement of every frame.
+    shift_x = 0
+    shift_y = 0
+    if union[0] < CANVAS_MARGIN:
+        shift_x = CANVAS_MARGIN - union[0]
+    elif union[2] > canvas_size - CANVAS_MARGIN:
+        shift_x = canvas_size - CANVAS_MARGIN - union[2]
+    if union[1] < CANVAS_MARGIN:
+        shift_y = CANVAS_MARGIN - union[1]
+    elif union[3] > canvas_size - CANVAS_MARGIN:
+        shift_y = canvas_size - CANVAS_MARGIN - union[3]
+
+    for image, (left, top, width, height), destination in zip(
+        images, placements, destination_paths
+    ):
+        rendered = image.resize((width, height), Image.Resampling.LANCZOS)
         canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-        _paste_subject(canvas, image, padding, anchor)
+        canvas.alpha_composite(rendered, (left + shift_x, top + shift_y))
         destination.parent.mkdir(parents=True, exist_ok=True)
         canvas.save(destination, format="PNG", optimize=True)

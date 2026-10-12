@@ -29,6 +29,44 @@ class PetAnimationTests(unittest.TestCase):
         self.assertIn("contact", walk[0])
         self.assertIn("breathing", sleep[1])
 
+    def test_pose_plans_never_repeat_a_neighbouring_pose(self):
+        # Two identical pose prompts in a row made the image model return two
+        # near-identical images, which reads as shimmer instead of motion. The
+        # same holds across the loop seam, where frame 0 follows frame N-1.
+        for role in ("idle", "walk", "sleep", "react"):
+            for count in range(2, 25):
+                plan = pose_plan_for(role, count)
+                self.assertEqual(len(plan), count)
+                for index in range(count):
+                    self.assertNotEqual(
+                        plan[index],
+                        plan[(index + 1) % count],
+                        f"{role}/{count} repeats a pose at index {index}",
+                    )
+
+    def test_shorter_plans_are_a_uniform_subsample_of_the_cycle(self):
+        walk = pose_plan_for("walk", 12)
+
+        self.assertEqual(pose_plan_for("walk", 6), [walk[index] for index in (0, 2, 4, 6, 8, 10)])
+        self.assertEqual(pose_plan_for("walk", 3), [walk[index] for index in (0, 4, 8)])
+
+    def test_idle_plan_covers_one_breath_cycle_in_order(self):
+        idle = pose_plan_for("idle", 4)
+
+        self.assertEqual(len(set(idle)), 4)
+        self.assertIn("breathing in", idle[1])
+        self.assertIn("breathing peak", idle[2])
+        self.assertIn("breathing out", idle[3])
+
+    def test_longer_plans_describe_a_phase_and_close_the_loop(self):
+        plan = pose_plan_for("walk", 16)
+
+        self.assertEqual(len(plan), 16)
+        self.assertEqual(len(set(plan)), 16)
+        # The last frame must say how it returns to the first pose of the cycle
+        # instead of silently jumping back to it.
+        self.assertIn("next pose in the cycle", plan[-1])
+
     def test_hybrid_manifest_contains_sequences_and_skeleton_path(self):
         assets = {
             "idle": ["assets/idle_0.png"],

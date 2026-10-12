@@ -31,11 +31,11 @@ ANIMATION_MODES = ("png", "skeleton", "hybrid")
 
 
 _POSE_PLANS = {
+    # Each plan is exactly one cycle of the action. A plan that repeats its own
+    # phases makes a short request land on every other phase (four frames of a
+    # doubled breathing cycle used to describe two fast breaths instead of one
+    # slow one), so keep one cycle per plan and let pose_plan_for sample it.
     "idle": (
-        "neutral breathing",
-        "breathing in",
-        "breathing peak",
-        "breathing out",
         "neutral breathing",
         "breathing in",
         "breathing peak",
@@ -108,17 +108,64 @@ def frame_count_for_role(role: str, requested: Optional[int] = None) -> int:
     return max(1, min(MAX_FRAME_COUNT, count))
 
 
+def _phase_pose(plan: Sequence[str], index: int, count: int) -> str:
+    """Describe one frame as an explicit phase of the authored cycle.
+
+    Two neighbouring frames that ask the image model for the *same* pose come
+    back as two nearly identical but not pixel-identical images, which the eye
+    reads as shimmer instead of motion. Spelling out the phase keeps every
+    frame request distinct and also tells the model how the last frame of a
+    looping sequence returns to the first one.
+    """
+
+    length = len(plan)
+    position = (index * length) / float(count)
+    lower = int(math.floor(position)) % length
+    upper = (lower + 1) % length
+    ratio = position - math.floor(position)
+    return (
+        f"{plan[lower]} at cycle phase {index + 1} of {count}, about "
+        f"{int(round(ratio * 100))}% of the way toward the next pose in the "
+        f"cycle ({plan[upper]})"
+    )
+
+
 def pose_plan_for(role: str, frame_count: Optional[int] = None) -> List[str]:
-    """Return an ordered, cyclic pose plan for an action sequence."""
+    """Return an ordered, cyclic pose plan for an action sequence.
+
+    The plan is always a uniform, closed sampling of the authored cycle:
+
+    - sampling uses ``floor`` over the cycle phase, so the step from the last
+      frame back to the first has the same phase delta as every other step and
+      looping sequences do not pop at the seam;
+    - no two neighbouring frames — including the last and first frame of the
+      cycle — ever carry the same pose text;
+    - when more frames are requested than the cycle has key poses, every frame
+      describes an explicit phase between two key poses instead of repeating
+      one.
+    """
 
     count = frame_count_for_role(role, frame_count)
     plan = list(_POSE_PLANS.get(role, _POSE_PLANS["idle"]))
-    if count == len(plan):
-        return plan
-    # Sample the authored cycle evenly instead of appending the first few
-    # poses when a longer sequence is requested. This keeps the last pose
-    # close to the cycle boundary and works better with sequential AI frames.
-    return [plan[round(index * len(plan) / count) % len(plan)] for index in range(count)]
+    if not plan:
+        return []
+    if count == 1:
+        return [plan[0]]
+
+    poses: List[str] = []
+    for index in range(count):
+        position = (index * len(plan)) / float(count)
+        lower = int(math.floor(position)) % len(plan)
+        ratio = position - math.floor(position)
+        if count > len(plan) or ratio > 0.02:
+            poses.append(_phase_pose(plan, index, count))
+        else:
+            poses.append(plan[lower])
+        if len(poses) > 1 and poses[-1] == poses[-2]:
+            poses[-1] = _phase_pose(plan, index, count)
+    if len(poses) > 1 and poses[-1] == poses[0]:
+        poses[-1] = _phase_pose(plan, len(poses) - 1, count)
+    return poses
 
 
 def _sequence_frame_paths(role: str, frame_paths: Sequence[str]) -> List[str]:

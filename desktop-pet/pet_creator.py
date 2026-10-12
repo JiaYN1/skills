@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Sequence
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from pet_assets import normalize_pet_image
+from pet_assets import normalize_pet_sequence
 from pet_animation import normalize_animation_mode, normalize_frame_repeat, write_animation_bundle
 from pet_common import IMAGE_EXTENSIONS, ROLE_LABELS, ROLES, assign_roles, safe_filename, unique_directory
 
@@ -54,19 +54,22 @@ def create_package(
     roles = assign_roles(photo_paths)
     config_assets: Dict[str, List[str]] = {}
     for role in ROLES:
-        config_assets[role] = []
-        for index, source_path in enumerate(roles[role]):
-            filename = f"{role}_{index}.png"
-            destination = assets_dir / filename
-            normalize_pet_image(
-                source_path,
-                destination,
+        # Normalize a whole role as one sequence so every frame of that action
+        # shares one render scale and one body alignment. Normalizing each photo
+        # on its own lets each frame pick its own scale, which is the main
+        # source of frame-to-frame jitter in a photo pet.
+        role_paths = list(roles[role])
+        destinations = [assets_dir / f"{role}_{index}.png" for index in range(len(role_paths))]
+        if destinations:
+            normalize_pet_sequence(
+                role_paths,
+                destinations,
                 canvas_size=320,
                 background_mode="simple" if use_simple_background else "none",
                 anchor="center" if role == "sleep" else "bottom",
                 subject_scale=0.96,
             )
-            config_assets[role].append(f"assets/{filename}")
+        config_assets[role] = [f"assets/{destination.name}" for destination in destinations]
 
     animation_manifest = write_animation_bundle(
         package_dir,
