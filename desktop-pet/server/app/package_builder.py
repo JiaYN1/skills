@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pet_assets import has_usable_transparency, normalize_pet_image, normalize_pet_sequence
+from pet_atlas import grid_check, grid_for, load_sheet, save_frames, split_atlas
 from pet_animation import write_animation_bundle
 from pet_common import ROLES, assign_roles, normalize_selected_actions, safe_filename
 from pet_quality import judge_sequence, subject_signatures
@@ -43,12 +44,75 @@ async def ai_cutout_frame(provider: OpenAICompatibleImageProvider, source: Path,
     await provider.remove_background(source, output_path)
     if has_usable_transparency(output_path):
         return output_path
-
     retry_path = output_path.with_name(f"{output_path.stem}_retry{output_path.suffix}")
     await provider.remove_background(output_path, retry_path)
     if has_usable_transparency(retry_path):
         return retry_path
     return output_path
+
+
+def atlas_frame_threshold(mode: object) -> int:
+    """Return the frame count from which a role is worth one sheet request.
+
+    ``auto`` only attempts a sheet when a per-frame build would cost several
+    requests, so a short role never risks a wasted sheet; ``on`` attempts it for
+    any multi-frame role; ``off`` never does.
+    """
+
+    normalized = str(mode or "auto").strip().lower()
+    if normalized in {"off", "false", "0", "never"}:
+        return 0
+    if normalized in {"on", "true", "1", "always"}:
+        return 2
+    return 4
+
+
+async def generate_role_from_sheet(
+    provider: OpenAICompatibleImageProvider,
+    role: str,
+    role_dir: Path,
+    frame_count: int,
+    identity_reference: Optional[Path],
+    references: Optional[Sequence[Path]],
+) -> List[Path]:
+    """Generate a whole role as one sheet and return its split frames.
+
+    Returns an empty list when the sheet cannot be trusted, which is the signal
+    for the caller to fall back to one request per frame. The grid is checked
+    before anything is written, because a sheet with a cut-through subject or a
+    mismatched cell is worse than no sheet at all.
+    """
+
+    columns, rows = grid_for(frame_count)
+    sheet_path = role_dir / f"{role}_sheet.png"
+    await provider.generate_action_sheet(
+        role,
+        sheet_path,
+        frame_count=frame_count,
+        columns=columns,
+        rows=rows,
+        identity_reference=identity_reference,
+        references=references,
+    )
+    sheet = load_sheet(sheet_path)
+    report = grid_check(sheet, columns, rows, frame_count)
+    if not report["ok"] and not report["has_alpha"]:
+        # Most gateways ignore the transparency request, so a sheet that still
+        # has no alpha gets exactly one cutout pass before it is judged: one
+        # extra request is still far cheaper than one request per frame.
+        cutout_path = role_dir / f"{role}_sheet_cutout.png"
+        try:
+            sheet_path = await ai_cutout_frame(provider, sheet_path, cutout_path)
+            sheet = load_sheet(sheet_path)
+            report = grid_check(sheet, columns, rows, frame_count)
+        except Exception:
+            report = grid_check(sheet, columns, rows, frame_count)
+    if not report["ok"]:
+        return []
+    frames = split_atlas(sheet, columns, rows, frame_count)
+    destinations = [role_dir / f"{role}_{index}.png" for index in range(len(frames))]
+    save_frames(frames, destinations)
+    return destinations
 
 
 async def build_pet_package(
@@ -116,7 +180,39 @@ async def build_pet_package(
                 "completed_roles": list(completed_roles_state),
             },
         )
+        atlas_ready = False
         if role in selected_action_set:
+            if role_frame_count >= atlas_frame_threshold(getattr(settings, "atlas_mode", "auto")):
+                progress(
+                    10 + role_index * 18,
+                    f"正在用单张拼图生成{_role_label(role)}动作（{role_frame_count} 帧）",
+                )
+                try:
+                    sheet_frames = await generate_role_from_sheet(
+                        provider,
+                        role,
+                        ai_dir / role,
+                        role_frame_count,
+                        normalized_inputs[0] if normalized_inputs else None,
+                        role_inputs[role],
+                    )
+                except Exception as error:
+                    if isinstance(error, GenerationCancelled):
+                        raise BuildCancelled(str(error))
+                    ai_error_count += 1
+                    progress(
+                        10 + role_index * 18,
+                        f"{_role_label(role)}拼图生成失败，改用逐帧生成：{error}",
+                    )
+                    sheet_frames = []
+                if sheet_frames:
+                    generated = sheet_frames
+                    atlas_ready = True
+                    progress(
+                        10 + role_index * 18,
+                        f"单张拼图已切成 {len(sheet_frames)} 帧",
+                    )
+        if role in selected_action_set and not generated:
             try:
                 generated = await provider.generate_action_frames(
                     role_inputs[role],
@@ -148,43 +244,49 @@ async def build_pet_package(
             progress(10 + role_index * 18, f"未选择生成{_role_label(role)}，使用照片动画兜底")
 
         if generated:
-            # Run every AI action frame through the same AI cutout workflow as
-            # the upload preview. This is intentionally a second pass for
-            # models/gateways that return an RGB checkerboard or chroma-key
-            # matte even when the prompt requests alpha.
-            cleaned_sources: List[Path] = []
-            for frame_index, source in enumerate(generated):
-                _check_cancelled(should_cancel)
-                cleaned_path = ai_dir / role / f"{role}_{frame_index}_cutout.png"
-                if (
-                    frame_index < start_index
-                    and cleaned_path.exists()
-                    and has_usable_transparency(cleaned_path)
-                ):
-                    cleaned_sources.append(cleaned_path)
-                else:
-                    try:
-                        cleaned_sources.append(await ai_cutout_frame(provider, source, cleaned_path))
-                    except GenerationCancelled:
-                        raise BuildCancelled("任务已停止")
-                    except Exception as error:
-                        ai_error_count += 1
-                        progress(
-                            10 + role_index * 18,
-                            f"{_role_label(role)}第 {frame_index + 1} 帧去背景失败，保留原帧：{error}",
-                        )
-                        cleaned_sources.append(source)
-                _write_checkpoint(
-                    checkpoint,
-                    {
-                        "stage": "actions",
-                        "role": role,
-                        "role_index": role_index,
-                        "completed_frame_count": frame_index + 1,
-                        "completed_roles": list(completed_roles_state),
-                    },
-                )
-            sources = cleaned_sources
+            if atlas_ready:
+                # The cells came from one generation whose alpha was already
+                # verified by the grid check, so the per-frame cutout pass would
+                # only add one request per frame and undo the saving.
+                sources = generated
+            else:
+                # Run every AI action frame through the same AI cutout workflow
+                # as the upload preview. This is intentionally a second pass for
+                # models/gateways that return an RGB checkerboard or chroma-key
+                # matte even when the prompt requests alpha.
+                cleaned_sources: List[Path] = []
+                for frame_index, source in enumerate(generated):
+                    _check_cancelled(should_cancel)
+                    cleaned_path = ai_dir / role / f"{role}_{frame_index}_cutout.png"
+                    if (
+                        frame_index < start_index
+                        and cleaned_path.exists()
+                        and has_usable_transparency(cleaned_path)
+                    ):
+                        cleaned_sources.append(cleaned_path)
+                    else:
+                        try:
+                            cleaned_sources.append(await ai_cutout_frame(provider, source, cleaned_path))
+                        except GenerationCancelled:
+                            raise BuildCancelled("任务已停止")
+                        except Exception as error:
+                            ai_error_count += 1
+                            progress(
+                                10 + role_index * 18,
+                                f"{_role_label(role)}第 {frame_index + 1} 帧去背景失败，保留原帧：{error}",
+                            )
+                            cleaned_sources.append(source)
+                    _write_checkpoint(
+                        checkpoint,
+                        {
+                            "stage": "actions",
+                            "role": role,
+                            "role_index": role_index,
+                            "completed_frame_count": frame_index + 1,
+                            "completed_roles": list(completed_roles_state),
+                        },
+                    )
+                sources = cleaned_sources
         else:
             sources = role_inputs[role] or [normalized_inputs[0]]
         ai_frame_total += len(generated)

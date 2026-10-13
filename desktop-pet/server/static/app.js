@@ -348,6 +348,7 @@ function fillAiSettings(values) {
   document.querySelector("#ai-animation-fps").value = values.animation_fps || 12;
   document.querySelector("#ai-frame-repeat").value = values.frame_repeat || 1;
   document.querySelector("#ai-animation-mode").value = values.animation_mode || "hybrid";
+  document.querySelector("#ai-atlas-mode").value = values.atlas_mode || "auto";
   document.querySelector("#ai-pose-consistency").checked = values.pose_consistency !== false;
   document.querySelector("#ai-key").value = "";
   document.querySelector("#ai-key").placeholder = values.configured
@@ -516,6 +517,7 @@ aiSettingsForm.addEventListener("submit", async (event) => {
       animation_fps: Number(document.querySelector("#ai-animation-fps").value),
       frame_repeat: Number(document.querySelector("#ai-frame-repeat").value),
       animation_mode: document.querySelector("#ai-animation-mode").value,
+      atlas_mode: document.querySelector("#ai-atlas-mode").value,
       pose_consistency: document.querySelector("#ai-pose-consistency").checked,
       clear_api_key: document.querySelector("#ai-clear-key").checked,
     };

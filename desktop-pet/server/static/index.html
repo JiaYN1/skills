@@ -128,6 +128,15 @@
                 <option value="skeleton">2D 骨骼清单</option>
               </select>
             </label>
+            <label>
+              动作帧生成方式
+              <select id="ai-atlas-mode">
+                <option value="auto">auto：长动作先试一次拼图（推荐，省额度）</option>
+                <option value="on">on：2 帧以上都先用拼图</option>
+                <option value="off">off：始终逐帧生成</option>
+              </select>
+            </label>
+            <p class="hint">拼图模式一次请求生成整张精灵表再切帧，主体大小和配色天然一致，请求数约为逐帧的 1/N；服务端会逐格校验，不合格自动退回逐帧生成。</p>
             <label class="check">
               <input id="ai-pose-consistency" type="checkbox" />
               锁定身份、比例、镜头和落地基线，减少动作帧漂移

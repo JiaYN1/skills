@@ -6,7 +6,7 @@ import shutil
 import sys
 from typing import Callable
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -129,6 +129,49 @@ class OpenAICompatibleImageProvider:
         if not output_paths and errors:
             raise ImageGenerationError("动作帧生成失败：" + "；".join(errors[-3:]))
         return output_paths
+
+    async def generate_action_sheet(
+        self,
+        role: str,
+        output_path: Path,
+        frame_count: int = 8,
+        columns: int = 4,
+        rows: int = 2,
+        identity_reference: Optional[Path] = None,
+        references: Optional[Sequence[Path]] = None,
+        pose_consistency: Optional[bool] = None,
+    ) -> Path:
+        """Generate a whole action as one sprite sheet.
+
+        One request per role instead of one per frame, which is both cheaper and
+        more coherent: every cell comes from the same generation, so body size,
+        colours, and lighting agree by construction rather than by luck. The
+        caller must still validate the grid with ``pet_atlas.grid_check`` before
+        trusting the cells.
+        """
+
+        if not self.available:
+            raise ImageGenerationError("AI 图像服务未配置，无法生成动作帧")
+
+        count = frame_count_for_role(role, frame_count)
+        keep_consistency = (
+            getattr(self.settings, "pose_consistency", True)
+            if pose_consistency is None
+            else bool(pose_consistency)
+        )
+        transparent_background = self._transparent_background_support(
+            self.settings.ai_image_model
+        )
+        prompt = self._prompt_for(
+            role,
+            frame_count=count,
+            pose_consistency=keep_consistency,
+            transparent_background=transparent_background,
+            sheet_grid=(max(1, int(columns)), max(1, int(rows))),
+        )
+        reference_paths = self._reference_paths(references, identity_reference)
+        reference_paths = reference_paths[: self.settings.ai_max_references]
+        return await self._generate_single_image(prompt, reference_paths, output_path)
 
     async def generate_action_frame(
         self,
@@ -342,11 +385,34 @@ class OpenAICompatibleImageProvider:
         continuity_reference: bool = False,
         next_reference: bool = False,
         quality_hint: str = "",
+        sheet_grid: Optional[Tuple[int, int]] = None,
     ) -> str:
         action = ROLE_PROMPTS.get(role, ROLE_PROMPTS["idle"])
         count = frame_count_for_role(role, frame_count)
         plan = pose_plan_for(role, count)
-        if frame_index is None:
+        if sheet_grid is not None:
+            columns, rows = int(sheet_grid[0]), int(sheet_grid[1])
+            sequence = "; ".join(
+                f"cell {index + 1}: {frame_pose}"
+                for index, frame_pose in enumerate(plan)
+            )
+            frame_request = (
+                f"Draw this cycle as one single image arranged in a {columns} column by {rows} row "
+                f"grid, {columns * rows} equal cells, {count} cells filled in reading order "
+                "(left to right, top to bottom) and any spare cell left empty. Every cell holds one "
+                "complete full-body pose on the shared ground line, at the same size, the same camera, "
+                "and the same lighting, with no cell borders, no dividing lines, and no panel frames. "
+                f"The ordered pose plan is: {sequence}."
+            )
+            consistency = (
+                "Lock identity and proportions to the first identity reference before changing only the "
+                "pose, and keep every cell of the grid consistent with the others: same face, markings, "
+                "fur or feather pattern, ear shape, tail shape, camera angle, lighting direction, crop, "
+                "scale, and ground contact."
+                if pose_consistency
+                else "Keep the animal recognizable, full-body, and consistent in every cell."
+            )
+        elif frame_index is None:
             sequence = "; ".join(
                 f"frame {index + 1}: {frame_pose}"
                 for index, frame_pose in enumerate(plan)

@@ -28,6 +28,13 @@ def _animation_mode(value: Any, default: str = "hybrid") -> str:
     return mode if mode in {"png", "skeleton", "hybrid"} else default
 
 
+def _atlas_mode(value: Any, default: str = "auto") -> str:
+    """Normalize the sprite-sheet mode: auto, on, or off."""
+
+    mode = str(value or default).strip().lower()
+    return mode if mode in {"auto", "on", "off"} else default
+
+
 @dataclass
 class Settings:
     data_dir: Path
@@ -52,6 +59,9 @@ class Settings:
     walk_frame_count: int = 16
     sleep_frame_count: int = 12
     animation_defaults_version: int = 2
+    #: "auto" asks for one sprite sheet per long role, "on" for every
+    #: multi-frame role, "off" always generates one request per frame.
+    atlas_mode: str = "auto"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -86,6 +96,7 @@ class Settings:
             frame_repeat=max(1, min(4, _env_int("ANIMATION_FRAME_REPEAT", 1))),
             walk_frame_count=max(1, min(24, _env_int("WALK_FRAME_COUNT", 16))),
             sleep_frame_count=max(1, min(24, _env_int("SLEEP_FRAME_COUNT", 12))),
+            atlas_mode=_atlas_mode(os.getenv("ATLAS_MODE", "auto")),
         )
         result._load_runtime_overrides()
         return result
@@ -143,6 +154,8 @@ class Settings:
             self.walk_frame_count = max(1, min(24, values["walk_frame_count"]))
         if isinstance(values.get("sleep_frame_count"), int):
             self.sleep_frame_count = max(1, min(24, values["sleep_frame_count"]))
+        if isinstance(values.get("atlas_mode"), str):
+            self.atlas_mode = _atlas_mode(values["atlas_mode"])
 
     def _runtime_values(self) -> Dict[str, Any]:
         return {
@@ -160,6 +173,7 @@ class Settings:
             "walk_frame_count": self.walk_frame_count,
             "sleep_frame_count": self.sleep_frame_count,
             "animation_defaults_version": self.animation_defaults_version,
+            "atlas_mode": self.atlas_mode,
         }
 
     def _persist_runtime_values(self) -> None:
@@ -233,6 +247,8 @@ class Settings:
             self.walk_frame_count = max(1, min(24, int(values["walk_frame_count"])))
         if values.get("sleep_frame_count") is not None:
             self.sleep_frame_count = max(1, min(24, int(values["sleep_frame_count"])))
+        if values.get("atlas_mode") is not None:
+            self.atlas_mode = _atlas_mode(values["atlas_mode"])
 
         return self.ai_public()
 
@@ -253,6 +269,7 @@ class Settings:
             "frame_repeat": self.frame_repeat,
             "walk_frame_count": self.walk_frame_count,
             "sleep_frame_count": self.sleep_frame_count,
+            "atlas_mode": self.atlas_mode,
         }
 
     def with_ai_snapshot(self, values: Dict[str, Any]) -> "Settings":
@@ -285,6 +302,7 @@ class Settings:
             "frame_repeat": self.frame_repeat,
             "walk_frame_count": self.walk_frame_count,
             "sleep_frame_count": self.sleep_frame_count,
+            "atlas_mode": self.atlas_mode,
         }
 
     def frame_count_for_role(self, role: str) -> int:

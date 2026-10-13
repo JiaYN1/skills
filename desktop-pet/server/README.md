@@ -52,6 +52,7 @@ AI_API_KEY=...
 AI_IMAGE_MODEL=gpt-image-1
 POSE_CONSISTENCY=true
 ANIMATION_MODE=hybrid
+ATLAS_MODE=auto
 ANIMATION_FPS=12
 ANIMATION_FRAME_REPEAT=1
 WALK_FRAME_COUNT=16
@@ -59,6 +60,8 @@ SLEEP_FRAME_COUNT=12
 ```
 
 也可以把 `AI_API_BASE_URL` 指向内部网关或其他兼容服务。服务端会优先请求图片编辑接口 `/images/edits`，没有参考图时使用 `/images/generations`，并兼容 base64 与 URL 两种响应。
+
+`ATLAS_MODE=auto`（默认）会让 4 帧以上的动作先请求一次“整张拼图”，再用固定网格切分并逐格校验（空帧、主体被切断、主体大小不一致），不合格就自动退回逐帧生成；`on` 对 2 帧以上的动作都这样做，`off` 始终逐帧。拼图模式把请求数从 N 降到约 1，但最终能否使用取决于网关是否按要求画出规整网格。
 
 AI 生成会把用户图片发送到各自配置的图像服务；仍建议生产环境补充限流、审计、对象存储和隐私告知。
 
