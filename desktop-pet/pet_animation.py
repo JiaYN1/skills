@@ -324,6 +324,12 @@ def build_animation_manifest(
     frame_rate = max(1, min(60, int(fps)))
     repeat = normalize_frame_repeat(frame_repeat)
     frame_duration_ms = round(1000.0 / frame_rate)
+    # The rate the *poses* actually change at, which is what decides whether an
+    # action reads as smooth. Holding a pose for `frame_repeat` slots multiplies
+    # the frame duration, so a 12 fps manifest with repeat 3 shows four distinct
+    # poses per second; runtimes and the UI should quote this number rather than
+    # the raw repeat count.
+    effective_fps = round(frame_rate / repeat, 4)
     sequences: Dict[str, Any] = {}
     for role in ANIMATION_ROLES:
         source_paths = [str(item) for item in assets.get(role, [])]
@@ -335,8 +341,10 @@ def build_animation_manifest(
             "fps": frame_rate,
             "frame_duration_ms": frame_duration_ms,
             "frame_repeat": repeat,
+            "effective_fps": effective_fps,
             "effective_frame_count": len(frame_paths) * repeat,
             "effective_frame_duration_ms": frame_duration_ms * repeat,
+            "cycle_duration_ms": frame_duration_ms * repeat * len(frame_paths),
             "frames": frame_paths,
             "pose_plan": pose_plan_for(role, len(frame_paths)),
             "source_frame_count": len(source_paths),
@@ -348,6 +356,7 @@ def build_animation_manifest(
         "mode": normalized_mode,
         "fps": frame_rate,
         "frame_repeat": repeat,
+        "effective_fps": effective_fps,
         "sequences": sequences,
     }
     if normalized_mode in {"skeleton", "hybrid"}:

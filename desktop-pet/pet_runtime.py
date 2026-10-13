@@ -267,6 +267,13 @@ class PetWindow:
             self.frame_repeat = max(1, min(4, int(config.animation.get("frame_repeat", 1))))
         except (TypeError, ValueError):
             self.frame_repeat = 1
+        try:
+            self.effective_fps = max(
+                0.5,
+                min(60.0, float(config.animation.get("effective_fps", self.animation_fps / self.frame_repeat))),
+            )
+        except (TypeError, ValueError):
+            self.effective_fps = self.animation_fps / self.frame_repeat
         self.frame_interval = 1.0 / self.animation_fps
         # Poll at least twice per frame so a high-FPS configuration does not
         # skip frames. The image item itself is updated in place below; this is
@@ -274,6 +281,23 @@ class PetWindow:
         # visible flash on transparent windows.
         self.tick_ms = max(8, min(50, round(500.0 / self.animation_fps)))
         self.next_frame_at = 0.0
+        # A walk cycle is locked to the ground, not to the wall clock: one
+        # animation slot per `distance_per_slot` pixels actually travelled. At
+        # the nominal speed this reproduces exactly the fps timing, and it keeps
+        # the feet planted when the two would otherwise disagree (a pet blocked
+        # at a screen edge, or an edited speed in pet_config.json).
+        try:
+            configured_distance = float(config.animation.get("distance_per_slot"))
+        except (TypeError, ValueError):
+            configured_distance = 0.0
+        if configured_distance > 0:
+            self.distance_per_slot = configured_distance
+        else:
+            self.distance_per_slot = max(
+                0.25,
+                (max(0.0, float(config.speed)) * 1000.0 / self.tick_ms) / self.animation_fps,
+            )
+        self.gait_phase = 0.0
         self.root = tk.Tk()
         self.root.title(config.name)
         self.root.overrideredirect(True)
@@ -414,6 +438,47 @@ class PetWindow:
         top = (canvas.height - image.height) // 2 + y_offset
         canvas.alpha_composite(image, (left, top))
 
+    @staticmethod
+    def _composite_clipped(canvas, image, left: int, top: int) -> None:
+        """Composite a sprite that may stick out past the canvas edges.
+
+        Every rendered frame has to be exactly canvas-sized, so a pose that grew
+        past the edge is cropped rather than allowed to move the ground line.
+        """
+
+        destination_left = max(0, int(left))
+        destination_top = max(0, int(top))
+        source_left = max(0, -int(left))
+        source_top = max(0, -int(top))
+        width = min(image.width - source_left, canvas.width - destination_left)
+        height = min(image.height - source_top, canvas.height - destination_top)
+        if width <= 0 or height <= 0:
+            return
+        cropped = image.crop(
+            (source_left, source_top, source_left + width, source_top + height)
+        )
+        canvas.alpha_composite(cropped, (destination_left, destination_top))
+
+    def _grounded_frame(self, source, amount: float = 1.0, y_offset: int = 0):
+        """Grow or shrink the pet upward from its ground line.
+
+        The AI action frames share one baseline, so the procedural fallback has
+        to keep the same ground contact as well: a centered zoom lifts the feet
+        off that baseline, which makes a photo pet float next to a generated one
+        and reads as exactly the sort of wobble the sequence normalizer removes.
+        """
+
+        width, height = source.size
+        resized = source.resize(
+            (max(1, round(width * amount)), max(1, round(height * amount))),
+            self.Image.Resampling.LANCZOS,
+        )
+        canvas = self.Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        left = (width - resized.width) // 2
+        top = height - resized.height + int(y_offset)
+        self._composite_clipped(canvas, resized, left, top)
+        return canvas
+
     def _fit_image(self, image):
         max_size = 320
         if self.config.scale != 1.0:
@@ -432,48 +497,42 @@ class PetWindow:
         }
 
     def _animation_frame(self, source, state: str, step: int):
-        """Create subtle procedural motion around the user's photo."""
+        """Create subtle procedural motion around the user's photo.
+
+        Photo pets only have one still image per role, so the motion is drawn
+        around its ground line instead of around its center. Amplitudes stay
+        small on purpose: a fallback role has to look like a slower sibling of
+        the AI frames, not like a different animation style.
+        """
 
         source = self._fit_image(source)
         width, height = source.size
         if state == "idle":
-            amount = 1.0 + math.sin(step / 8.0 * math.pi * 2) * 0.018
-            y_offset = round(math.sin(step / 8.0 * math.pi * 2) * 2)
-            resized = source.resize(
-                (max(1, round(width * amount)), max(1, round(height * amount))),
-                self.Image.Resampling.LANCZOS,
-            )
-            canvas = self.Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            self._paste_center(canvas, resized, y_offset)
-            return canvas
+            breath = math.sin(step / 8.0 * math.pi * 2)
+            # Breathing grows upward from the feet; the ground contact is fixed.
+            return self._grounded_frame(source, 1.0 + breath * 0.012)
 
         if state == "walk":
-            amount = 1.0 + (0.018 if step % 2 else -0.012)
-            y_offset = 3 if step % 2 else -2
-            resized = source.resize(
-                (max(1, round(width * amount)), max(1, round(height * amount))),
-                self.Image.Resampling.LANCZOS,
-            )
-            canvas = self.Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            self._paste_center(canvas, resized, y_offset)
-            return canvas
+            amount = 1.02 if step % 2 else 0.99
+            # Only ever lift the paws, never push the pet through the floor.
+            y_offset = -2 if step % 2 else 0
+            return self._grounded_frame(source, amount, y_offset)
 
         if state == "sleep":
             angle = -5 + step * 2.5
-            rotated = source.rotate(angle, resample=self.Image.Resampling.BICUBIC, expand=False)
-            rotated = self.ImageEnhance.Brightness(rotated).enhance(0.86)
-            return rotated
+            # Pivot on the ground line so a sleeping curl keeps its contact.
+            rotated = source.rotate(
+                angle,
+                resample=self.Image.Resampling.BICUBIC,
+                center=(width / 2.0, height - 1.0),
+                expand=False,
+            )
+            return self.ImageEnhance.Brightness(rotated).enhance(0.86)
 
         # click reaction: a short squash-and-stretch bounce
         scale_values = (1.0, 1.08, 0.94, 1.04, 1.0, 1.0)
         amount = scale_values[step % len(scale_values)]
-        resized = source.resize(
-            (max(1, round(width * amount)), max(1, round(height * amount))),
-            self.Image.Resampling.LANCZOS,
-        )
-        canvas = self.Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        self._paste_center(canvas, resized, -round((amount - 1) * 18))
-        return canvas
+        return self._grounded_frame(source, amount, -round((amount - 1) * 18))
 
     def _skeleton_frame(self, source, state: str, step: int):
         """Apply the root bone timeline to a base sprite when skeleton mode is active."""
@@ -548,22 +607,24 @@ class PetWindow:
     def _load_animation_frames(self) -> Dict[str, List[Any]]:
         sources = self._source_images()
         frames: Dict[str, List[Any]] = {}
+        # Skeleton frames are only ever rendered by skeleton mode. Hybrid ships
+        # the skeleton manifest next to the PNG sequence but plays the PNGs, so
+        # computing a skeleton frame there resizes every frame for nothing.
+        render_skeleton = (
+            self.animation_mode == "skeleton" and self.skeleton_manifest is not None
+        )
         for role in ("idle", "walk", "sleep", "react"):
             role_sources = sources[role]
             frame_count = self._frame_count(role, len(role_sources))
             rendered = []
             for index in range(frame_count):
                 source = role_sources[index % len(role_sources)]
-                if self.animation_mode in {"skeleton", "hybrid"} and self.skeleton_manifest:
-                    skeleton_frame = self._skeleton_frame(source, role, index)
-                else:
-                    skeleton_frame = None
-                if skeleton_frame is not None and self.animation_mode == "skeleton":
-                    image = skeleton_frame
-                elif len(role_sources) > 1:
-                    image = self._fit_image(source)
-                else:
-                    image = self._animation_frame(source, role, index)
+                image = self._skeleton_frame(source, role, index) if render_skeleton else None
+                if image is None:
+                    if len(role_sources) > 1:
+                        image = self._fit_image(source)
+                    else:
+                        image = self._animation_frame(source, role, index)
                 rendered.extend([image] * self._frame_repeat(role))
             frames[role] = rendered
         return frames
@@ -587,6 +648,9 @@ class PetWindow:
         self.state_duration = duration
         self.frame_index = 0
         self.next_frame_at = 0.0
+        if state == "walk":
+            # Start the gait from a known phase, then let travel drive it.
+            self.gait_phase = 0.0
 
     def _on_press(self, event):
         self.drag_start = (event.x_root, event.y_root, round(self.x), round(self.y))
@@ -631,11 +695,14 @@ class PetWindow:
         elif self.state == "walk" and elapsed >= self.state_duration:
             self._enter_state("idle", 0.0)
 
-    def _move(self):
+    def _move(self) -> float:
+        """Move the pet and return how far it actually travelled this tick."""
+
         if self.state != "walk":
-            return
+            return 0.0
         screen_width = self.root.winfo_screenwidth()
         width = self.canvas.winfo_width()
+        previous_x = self.x
         self.x += self.direction * self.config.speed
         if self.x <= 0:
             self.x = 0
@@ -644,22 +711,41 @@ class PetWindow:
             self.x = max(0, screen_width - width)
             self.direction = -1
         self._set_geometry(width, self.canvas.winfo_height())
+        return self.x - previous_x
+
+    def _advance_walk_phase(self, travelled: float) -> None:
+        """Advance the walk cycle by the distance the pet actually travelled.
+
+        Stepping the cycle on the wall clock instead makes the planted foot
+        slide as soon as the two rates disagree, which they do at a screen edge
+        (the pet is clamped but the legs keep cycling) and whenever `speed` is
+        edited without touching the manifest.
+        """
+
+        if self.distance_per_slot <= 0:
+            return
+        self.gait_phase += abs(float(travelled)) / self.distance_per_slot
+        self.frame_index = int(self.gait_phase)
 
     def _tick(self):
         now = time.monotonic()
         self._maybe_change_state(now)
-        self._move()
+        travelled = self._move()
+        if self.state == "walk":
+            # The gait follows the ground, not the clock.
+            self._advance_walk_phase(travelled)
         role_frames = self.frames[self.state]
         frame = role_frames[self.frame_index % len(role_frames)]
         self.photo_image = frame
         self._present_frame(frame)
-        if self.next_frame_at <= 0.0:
-            self.next_frame_at = now + self.frame_interval
-        elif now >= self.next_frame_at:
-            elapsed = now - self.next_frame_at
-            steps = 1 + int(elapsed / self.frame_interval)
-            self.frame_index += steps
-            self.next_frame_at += steps * self.frame_interval
+        if self.state != "walk":
+            if self.next_frame_at <= 0.0:
+                self.next_frame_at = now + self.frame_interval
+            elif now >= self.next_frame_at:
+                elapsed = now - self.next_frame_at
+                steps = 1 + int(elapsed / self.frame_interval)
+                self.frame_index += steps
+                self.next_frame_at += steps * self.frame_interval
         self.root.after(self.tick_ms, self._tick)
 
     def _present_frame(self, frame) -> None:

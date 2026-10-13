@@ -24,6 +24,9 @@ from pet_common import IMAGE_EXTENSIONS, ROLE_LABELS, ROLES, assign_roles, safe_
 
 APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = APP_ROOT / "generated-pets"
+#: The local photo path renders at a fixed 10 fps manifest; the UI reports the
+#: distinct-pose rate that `frame_repeat` actually produces.
+CREATOR_ANIMATION_FPS = 10
 PYINSTALLER_PIL_OPTIONS = [
     "--collect-all",
     "PIL",
@@ -75,7 +78,7 @@ def create_package(
         package_dir,
         config_assets,
         mode=normalize_animation_mode(animation_mode),
-        fps=10,
+        fps=CREATOR_ANIMATION_FPS,
         frame_repeat=normalize_frame_repeat(frame_repeat),
     )
 
@@ -190,6 +193,15 @@ class CreatorApp(tk.Tk):
         self._busy = False
         self._build_ui()
 
+    def _refresh_effective_fps(self):
+        """Show the real pose rate instead of the raw hold count."""
+
+        label = getattr(self, "effective_fps_label", None)
+        if label is None:
+            return
+        repeat = normalize_frame_repeat(self.frame_repeat_var.get())
+        label.configure(text=f"约 {CREATOR_ANIMATION_FPS / repeat:.1f} 张/秒")
+
     def _build_ui(self):
         root = ttk.Frame(self, padding=18)
         root.pack(fill="both", expand=True)
@@ -262,8 +274,16 @@ class CreatorApp(tk.Tk):
             to=4,
             textvariable=self.frame_repeat_var,
             width=4,
+            command=self._refresh_effective_fps,
         ).pack(side="left", padx=(6, 0))
         ttk.Label(animation_options, text="次").pack(side="left", padx=(4, 0))
+        # Holding a pose for N slots hides the real playback rate; quoting the
+        # distinct-pose rate is what tells the user whether the action will look
+        # smooth or like a slideshow.
+        self.effective_fps_label = ttk.Label(animation_options, text="")
+        self.effective_fps_label.pack(side="left", padx=(8, 0))
+        self.frame_repeat_var.trace_add("write", lambda *_args: self._refresh_effective_fps())
+        self._refresh_effective_fps()
 
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(16, 0))
