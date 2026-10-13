@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pet_assets import has_usable_transparency, normalize_pet_image, normalize_pet_sequence
 from pet_animation import write_animation_bundle
 from pet_common import ROLES, assign_roles, normalize_selected_actions, safe_filename
+from pet_quality import judge_sequence, subject_signatures
 
 from .ai_provider import GenerationCancelled, OpenAICompatibleImageProvider
 from .config import Settings
@@ -87,8 +88,10 @@ async def build_pet_package(
     role_inputs = assign_roles(normalized_inputs)
     config_assets: Dict[str, List[str]] = {}
     resource_frame_meta: List[Dict[str, object]] = []
+    role_contracts: Dict[str, Dict[str, object]] = {}
     ai_frame_total = 0
     ai_error_count = 0
+    flagged_frame_total = 0
     selected_action_list = normalize_selected_actions(selected_actions)
     selected_action_set = set(selected_action_list)
     stored_roles = (resume_checkpoint or {}).get("completed_roles", [])
@@ -187,6 +190,7 @@ async def build_pet_package(
         ai_frame_total += len(generated)
         selected_sources = sources[: role_frame_count]
         destinations = [assets_dir / f"{role}_{index}.png" for index in range(len(selected_sources))]
+        role_report: Dict[str, object] = {}
         normalize_pet_sequence(
             selected_sources,
             destinations,
@@ -199,7 +203,23 @@ async def build_pet_package(
             background_mode="simple",
             anchor=ROLE_ANCHORS.get(role, "center"),
             subject_scale=0.96,
+            report=role_report,
         )
+        role_verdicts = judge_sequence(
+            role_report,
+            subject_signatures(selected_sources, background_mode="simple"),
+        )
+        role_flags = {
+            int(verdict["index"]): list(verdict["reasons"])
+            for verdict in role_verdicts
+            if verdict["reasons"]
+        }
+        role_contracts[role] = {
+            "render_scale": role_report.get("render_scale"),
+            "reference_index": role_report.get("reference_index"),
+            "placements": role_report.get("placements"),
+        }
+        flagged_frame_total += len(role_flags)
         if role not in completed_roles_state:
             completed_roles_state.append(role)
         _write_checkpoint(
@@ -228,6 +248,7 @@ async def build_pet_package(
                     "role": role,
                     "index": index,
                     "frame_count": role_frame_count,
+                    "quality_flags": role_flags.get(index, []),
                 }
             )
 
@@ -304,6 +325,10 @@ async def build_pet_package(
         "resource_preview_paths": resource_preview_paths,
         "resource_frame_meta": resource_frame_meta,
         "selected_actions": selected_action_list,
+        # The render contract of every role is what later single-frame edits
+        # reuse so that regenerating one frame cannot rescale the whole action.
+        "sequence_contract": role_contracts,
+        "flagged_frame_count": flagged_frame_total,
     }
 
 

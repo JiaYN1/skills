@@ -42,6 +42,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pet_assets import normalize_pet_image, normalize_pet_sequence  # noqa: E402
 from pet_animation import write_animation_bundle  # noqa: E402
 from pet_common import ROLES, assign_roles, normalize_selected_actions  # noqa: E402
+from pet_quality import REASON_LABELS, judge_sequence, prompt_hint, subject_signatures  # noqa: E402
 
 def _default_user_ai_config() -> Dict[str, Any]:
     values = settings.ai_snapshot()
@@ -1199,60 +1200,112 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
             job_dir / relative
             for relative in record.get("preview_paths", [])
         ]
-        role_inputs = assign_roles(prepared_paths)
-        identity_reference = prepared_paths[0]
-        raw_path = job_dir / "ai" / role / f"{role}_{index}.png"
-        await task_provider.generate_action_frame(
-            role_inputs[role],
-            role,
-            raw_path,
-            identity_reference=identity_reference,
-            frame_index=index,
-            frame_count=frame_count,
-            pose_consistency=getattr(task_settings, "pose_consistency", True),
-        )
-        cleaned_path = job_dir / "ai" / role / f"{role}_{index}_cutout.png"
-        try:
-            replacement_source = await ai_cutout_frame(task_provider, raw_path, cleaned_path)
-        except Exception:
-            # The normalizer still has a simple connected-background fallback;
-            # keep the existing resource usable if the extra AI pass fails.
-            replacement_source = raw_path
-        _check_job_cancelled(job_id)
+        identity_reference = prepared_paths[0] if prepared_paths else None
 
         all_meta = [
             dict(item)
             for item in record.get("resource_frame_meta", [])
             if isinstance(item, dict)
         ]
-        updated_meta: List[Dict[str, Any]] = []
-        role_meta: List[Dict[str, Any]] = []
-        for item in all_meta:
-            if item.get("role") == role:
-                if int(item.get("index", -1)) == index:
-                    item["source_path"] = _relative_job_path(job_dir, replacement_source)
-                    item["raw_source_path"] = _relative_job_path(job_dir, raw_path)
-                role_meta.append(item)
-            updated_meta.append(item)
+        role_meta = [
+            dict(item) for item in all_meta if item.get("role") == role
+        ]
         role_meta.sort(key=lambda item: int(item.get("index", 0)))
         if not role_meta:
             raise ValueError("动作帧元数据不存在")
-
-        sources = [job_dir / str(item["source_path"]) for item in role_meta]
-        destinations = [job_dir / str(item["asset_path"]) for item in role_meta]
-        if not all(path.exists() for path in sources):
-            raise ValueError("动作帧参考文件不存在")
-        normalize_pet_sequence(
-            sources,
-            destinations,
-            canvas_size=320,
-            background_mode="simple",
-            anchor=ROLE_ANCHORS.get(role, "center"),
-            subject_scale=0.96,
+        position = next(
+            (
+                offset
+                for offset, item in enumerate(role_meta)
+                if int(item.get("index", -1)) == index
+            ),
+            None,
         )
+        if position is None:
+            raise ValueError("目标动作帧不存在")
+        # Identity first, then the two temporal anchors: the generator is told
+        # that the last two references are the frames before and after the gap.
+        neighbour_sources = _role_neighbour_sources(job_dir, role_meta, position)
+        has_previous = position > 0
+        has_next = position + 1 < len(role_meta)
+        if identity_reference is None and not neighbour_sources:
+            fallback = (job_dir / str(role_meta[position].get("source_path", ""))).resolve()
+            if fallback.is_file():
+                neighbour_sources = [fallback]
+        package_dir = job_dir / "package"
+        contract = _role_contract(record, role)
+        replacement_source = None
+        quality_reasons: List[str] = []
+        quality_hint = ""
+        report: Dict[str, Any] = {}
+        remapped_role_meta: List[Dict[str, Any]] = []
+        for attempt in range(2):
+            _check_job_cancelled(job_id)
+            raw_path = job_dir / "ai" / role / f"{role}_{index}.png"
+            await task_provider.generate_action_frame(
+                neighbour_sources,
+                role,
+                raw_path,
+                identity_reference=identity_reference,
+                frame_index=index,
+                frame_count=frame_count,
+                pose_consistency=getattr(task_settings, "pose_consistency", True),
+                continuity_reference=has_previous,
+                next_reference=has_next,
+                quality_hint=quality_hint,
+            )
+            cleaned_path = job_dir / "ai" / role / f"{role}_{index}_cutout.png"
+            try:
+                replacement_source = await ai_cutout_frame(task_provider, raw_path, cleaned_path)
+            except Exception:
+                # The normalizer still has a simple connected-background
+                # fallback; keep going if the extra AI pass fails.
+                replacement_source = raw_path
+            _check_job_cancelled(job_id)
+
+            regenerated = dict(role_meta[position])
+            regenerated["source_path"] = _relative_job_path(job_dir, replacement_source)
+            regenerated["raw_source_path"] = _relative_job_path(job_dir, raw_path)
+            desired_role_items = list(role_meta)
+            desired_role_items[position] = regenerated
+            # The stored contract keeps every other frame exactly where it was;
+            # without it the whole action would be rescaled and shifted around
+            # the one new frame, which is the jump the user sees as flicker.
+            remapped_role_meta, _role_asset_paths, report, verdicts = _rewrite_resource_role_assets(
+                job_dir,
+                package_dir,
+                role,
+                desired_role_items,
+                contract=contract,
+            )
+            quality_reasons = _worst_verdict(verdicts, index)
+            if not quality_reasons or attempt:
+                break
+            quality_hint = prompt_hint(quality_reasons)
+            progress_message = _quality_message(quality_reasons)
+            store.update(
+                job_id,
+                message=f"{role}_{index}.png 质量检查未通过（{progress_message}），正在重试一次",
+                heartbeat_at=_utc_now(),
+            )
         _check_job_cancelled(job_id)
 
-        package_dir = job_dir / "package"
+        updated_meta = _replace_resource_role_metadata(
+            all_meta,
+            role,
+            remapped_role_meta,
+        )
+        if quality_reasons:
+            message = (
+                f"{role}_{index}.png 已重新生成，质量检查仍有标记（{_quality_message(quality_reasons)}），"
+                "可再次重生成或删除该帧"
+            )
+        else:
+            message = f"{role}_{index}.png 已重新生成，资源包已更新"
+        if report.get("contract_drift"):
+            drifted = [int(item) for item in report.get("contract_drift", []) if int(item) != index]
+            if drifted:
+                message += f"；{len(drifted)} 帧对齐发生偏移，已按原构图保留"
         zip_path = Path(record["package_path"])
         _rebuild_package_archive(package_dir, zip_path)
         revision = int(record.get("resource_preview_revision", 0)) + 1
@@ -1260,9 +1313,10 @@ async def _run_resource_regeneration(job_id: str, target_meta: Dict[str, Any]) -
             job_id,
             status="ready",
             progress=100,
-            message=f"{role}_{index}.png 已重新生成，资源包已更新",
+            message=message,
             resource_frame_meta=updated_meta,
             resource_preview_revision=revision,
+            sequence_contract=_store_role_contract(record, role, report),
             artifact_path=str(zip_path),
             artifact_kind="zip",
             build_exe=True,
@@ -1305,6 +1359,7 @@ def _run_resource_frame_removal(
             if isinstance(item, dict)
         ]
         updated_meta = all_meta
+        role_reports: Dict[str, Dict[str, Any]] = {}
         config_data = json.loads(config_path.read_text(encoding="utf-8"))
         config_assets = config_data.get("assets")
         if not isinstance(config_assets, dict):
@@ -1325,12 +1380,17 @@ def _run_resource_frame_removal(
             ]
             if not remaining:
                 raise ValueError(f"{role} 至少需要保留一帧")
-            remapped_role_meta, new_asset_paths = _rewrite_resource_role_assets(
+            # Deleting one frame must not resize or shift the frames that stay:
+            # re-deriving the shared scale without the old contract would let the
+            # remaining frames grow back to the median fit.
+            remapped_role_meta, new_asset_paths, role_report, _verdicts = _rewrite_resource_role_assets(
                 job_dir,
                 package_dir,
                 role,
                 remaining,
+                contract=_role_contract(record, role),
             )
+            role_reports[role] = role_report
             updated_meta = _replace_resource_role_metadata(
                 updated_meta,
                 role,
@@ -1378,6 +1438,10 @@ def _run_resource_frame_removal(
         ]
         revision = int(record.get("resource_preview_revision", 0)) + 1
         removed_count = sum(len(indices) for indices in requested.values())
+        contracts = record.get("sequence_contract")
+        contracts = dict(contracts) if isinstance(contracts, dict) else {}
+        for role, role_report in role_reports.items():
+            contracts[role] = _contract_from_report(role_report)
         store.update(
             job_id,
             status="ready",
@@ -1387,6 +1451,7 @@ def _run_resource_frame_removal(
             resource_frame_meta=updated_meta,
             resource_preview_revision=revision,
             frame_repeat=animation_manifest.get("frame_repeat", 1),
+            sequence_contract=contracts,
             artifact_path=str(zip_path),
             artifact_kind="zip",
             build_exe=True,
@@ -1407,13 +1472,106 @@ def _run_resource_frame_removal(
         )
 
 
+def _contract_from_report(report: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce a normalization report to the data a later edit needs to reuse."""
+
+    return {
+        "canvas_size": report.get("canvas_size"),
+        "render_scale": report.get("render_scale"),
+        "reference_index": report.get("reference_index"),
+        "placements": report.get("placements"),
+    }
+
+
+def _role_contract(record: Dict[str, Any], role: str) -> Optional[Dict[str, Any]]:
+    """Return the stored render contract of one role, if this job has one.
+
+    Regenerating a single frame without it re-derives the shared scale and
+    placement from scratch, which can rescale and shift every other frame of
+    the action; with it, the rest of the sequence keeps the geometry it already
+    shipped.
+    """
+
+    contracts = record.get("sequence_contract")
+    if isinstance(contracts, dict):
+        stored = contracts.get(role)
+        if (
+            isinstance(stored, dict)
+            and isinstance(stored.get("render_scale"), (int, float))
+            and isinstance(stored.get("reference_index"), int)
+        ):
+            return stored
+    return None
+
+
+def _store_role_contract(
+    record: Dict[str, Any],
+    role: str,
+    report: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return the job's contract map with one role refreshed."""
+
+    contracts = record.get("sequence_contract")
+    updated = dict(contracts) if isinstance(contracts, dict) else {}
+    updated[role] = _contract_from_report(report)
+    return updated
+
+
+def _role_neighbour_sources(
+    job_dir: Path,
+    role_items: List[Dict[str, Any]],
+    position: int,
+) -> List[Path]:
+    """Return the frame before and the frame after ``position``, in that order.
+
+    Feeding both neighbours is what makes an edited frame land *between* its
+    surroundings: with only the previous frame as anchor, the model is free to
+    invent any pose that merely follows it.
+    """
+
+    ordered = sorted(role_items, key=lambda item: int(item.get("index", 0)))
+    job_root = job_dir.resolve()
+    neighbours: List[Path] = []
+    for offset in (-1, 1):
+        neighbour_position = position + offset
+        if not 0 <= neighbour_position < len(ordered):
+            continue
+        candidate = (job_dir / str(ordered[neighbour_position].get("source_path", ""))).resolve()
+        if job_root in candidate.parents and candidate.is_file():
+            neighbours.append(candidate)
+    return neighbours
+
+
+def _worst_verdict(verdicts: List[Dict[str, Any]], index: int) -> List[str]:
+    """Return the quality reasons recorded for one frame index."""
+
+    for verdict in verdicts:
+        if int(verdict.get("index", -1)) == index:
+            return [str(reason) for reason in verdict.get("reasons", [])]
+    return []
+
+
+def _quality_message(reasons: List[str]) -> str:
+    """Return a short Chinese summary of one frame's quality flags."""
+
+    labels = [REASON_LABELS.get(reason, reason) for reason in reasons]
+    return "、".join(labels)
+
+
 def _rewrite_resource_role_assets(
     job_dir: Path,
     package_dir: Path,
     role: str,
     role_items: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Normalize one edited role and return its remapped metadata/assets."""
+    contract: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any], List[Dict[str, Any]]]:
+    """Normalize one edited role and return its remapped metadata/assets.
+
+    Also measures the result: the returned report is stored as the role's render
+    contract, the verdicts carry the per-frame quality flags, and every remapped
+    metadata entry receives its own ``quality_flags`` list so the preview can
+    mark the frames that need attention.
+    """
 
     frame_count = len(role_items)
     remapped: List[Dict[str, Any]] = []
@@ -1437,6 +1595,7 @@ def _rewrite_resource_role_assets(
         destinations.append(package_dir / "assets" / f"{role}_{new_index}.png")
         asset_paths.append(f"assets/{role}_{new_index}.png")
 
+    report: Dict[str, Any] = {}
     normalize_pet_sequence(
         sources,
         destinations,
@@ -1444,14 +1603,27 @@ def _rewrite_resource_role_assets(
         background_mode="simple",
         anchor=ROLE_ANCHORS.get(role, "center"),
         subject_scale=0.96,
+        report=report,
+        contract=contract,
     )
+    verdicts = judge_sequence(
+        report,
+        subject_signatures(sources, background_mode="simple"),
+    )
+    flags_by_index = {
+        int(verdict["index"]): list(verdict["reasons"])
+        for verdict in verdicts
+        if verdict["reasons"]
+    }
+    for item in remapped:
+        item["quality_flags"] = flags_by_index.get(int(item.get("index", -1)), [])
     assets_dir = package_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     desired = {path.resolve() for path in destinations}
     for stale in assets_dir.glob(f"{role}_*.png"):
         if stale.resolve() not in desired:
             stale.unlink()
-    return remapped, asset_paths
+    return remapped, asset_paths, report, verdicts
 
 
 def _replace_resource_role_metadata(
@@ -1506,47 +1678,72 @@ async def _run_resource_frame_insertion(
         previous_source = (job_dir / str(previous["source_path"])).resolve()
         if job_dir.resolve() not in previous_source.parents or not previous_source.is_file():
             raise ValueError("前一帧参考文件不存在")
+        next_source = (job_dir / str(role_meta[after_index + 1]["source_path"])).resolve()
+        if job_dir.resolve() not in next_source.parents or not next_source.is_file():
+            raise ValueError("后一帧参考文件不存在")
 
-        _prepared_preview_paths(job_id, record)
-        # Insertion is deliberately a one-reference operation: the frame
-        # immediately before the gap is the only continuity reference.
-        identity_reference = None
+        prepared_preview_paths = _prepared_preview_paths(job_id, record)
+        # Identity first, then the frames on both sides of the gap: the new frame
+        # has to sit *between* them, not merely follow the previous one.
+        identity_reference = prepared_preview_paths[0] if prepared_preview_paths else None
+        neighbour_sources = [previous_source, next_source]
         insertion_index = after_index + 1
-        token = uuid.uuid4().hex
-        raw_path = job_dir / "ai" / role / f"{role}_inserted_{token}.png"
-        await task_provider.generate_action_frame(
-            [previous_source],
-            role,
-            raw_path,
-            identity_reference=identity_reference,
-            frame_index=insertion_index,
-            frame_count=len(role_meta) + 1,
-            pose_consistency=getattr(task_settings, "pose_consistency", True),
-            continuity_reference=True,
-        )
-        cleaned_path = raw_path.with_name(f"{raw_path.stem}_cutout.png")
-        try:
-            replacement_source = await ai_cutout_frame(task_provider, raw_path, cleaned_path)
-        except Exception:
-            replacement_source = raw_path
-        _check_job_cancelled(job_id)
+        contract = _role_contract(record, role)
+        quality_reasons: List[str] = []
+        quality_hint = ""
+        report: Dict[str, Any] = {}
+        remapped_role_meta: List[Dict[str, Any]] = []
+        role_asset_paths: List[str] = []
+        for attempt in range(2):
+            _check_job_cancelled(job_id)
+            token = uuid.uuid4().hex
+            raw_path = job_dir / "ai" / role / f"{role}_inserted_{token}.png"
+            await task_provider.generate_action_frame(
+                neighbour_sources,
+                role,
+                raw_path,
+                identity_reference=identity_reference,
+                frame_index=insertion_index,
+                frame_count=len(role_meta) + 1,
+                pose_consistency=getattr(task_settings, "pose_consistency", True),
+                continuity_reference=True,
+                next_reference=True,
+                quality_hint=quality_hint,
+            )
+            cleaned_path = raw_path.with_name(f"{raw_path.stem}_cutout.png")
+            try:
+                replacement_source = await ai_cutout_frame(task_provider, raw_path, cleaned_path)
+            except Exception:
+                replacement_source = raw_path
+            _check_job_cancelled(job_id)
 
-        inserted = {
-            "asset_path": "",
-            "source_path": _relative_job_path(job_dir, replacement_source),
-            "raw_source_path": _relative_job_path(job_dir, raw_path),
-            "role": role,
-            "index": insertion_index,
-            "frame_count": len(role_meta) + 1,
-            "inserted": True,
-        }
-        desired_role_items = role_meta[:insertion_index] + [inserted] + role_meta[insertion_index:]
-        remapped_role_meta, role_asset_paths = _rewrite_resource_role_assets(
-            job_dir,
-            package_dir,
-            role,
-            desired_role_items,
-        )
+            inserted = {
+                "asset_path": "",
+                "source_path": _relative_job_path(job_dir, replacement_source),
+                "raw_source_path": _relative_job_path(job_dir, raw_path),
+                "role": role,
+                "index": insertion_index,
+                "frame_count": len(role_meta) + 1,
+                "inserted": True,
+            }
+            desired_role_items = role_meta[:insertion_index] + [inserted] + role_meta[insertion_index:]
+            remapped_role_meta, role_asset_paths, report, verdicts = _rewrite_resource_role_assets(
+                job_dir,
+                package_dir,
+                role,
+                desired_role_items,
+                contract=contract,
+            )
+            quality_reasons = _worst_verdict(verdicts, insertion_index)
+            if not quality_reasons or attempt:
+                break
+            quality_hint = prompt_hint(quality_reasons)
+            store.update(
+                job_id,
+                message=f"新插入的 {role}_{insertion_index}.png 质量检查未通过"
+                f"（{_quality_message(quality_reasons)}），正在重试一次",
+                heartbeat_at=_utc_now(),
+            )
         _check_job_cancelled(job_id)
         updated_meta = _replace_resource_role_metadata(
             all_meta,
@@ -1594,15 +1791,19 @@ async def _run_resource_frame_insertion(
             if item.get("asset_path")
         ]
         revision = int(record.get("resource_preview_revision", 0)) + 1
+        message = f"已在 {role}_{after_index}.png 后插入一帧，资源包已更新"
+        if quality_reasons:
+            message += f"；插入帧仍有质量标记（{_quality_message(quality_reasons)}），可重生成或删除"
         store.update(
             job_id,
             status="ready",
             progress=100,
-            message=f"已在 {role}_{after_index}.png 后插入一帧，资源包已更新",
+            message=message,
             resource_preview_paths=resource_preview_paths,
             resource_frame_meta=updated_meta,
             resource_preview_revision=revision,
             frame_repeat=animation_manifest.get("frame_repeat", 1),
+            sequence_contract=_store_role_contract(record, role, report),
             artifact_path=str(zip_path),
             artifact_kind="zip",
             build_exe=True,
@@ -1686,6 +1887,9 @@ async def _run_generation(
             message += "；等待 Windows Worker 打包 exe"
         if build_exe and settings.build_mode == "archive":
             message += "；Docker Linux 模式需接入 Windows Worker 才能生成 exe"
+        flagged_frame_total = int(result.get("flagged_frame_count", 0))
+        if flagged_frame_total:
+            message += f"；质量检查标记了 {flagged_frame_total} 帧，可在资源编辑里重生成"
         store.update(
             job_id,
             status=next_status,
@@ -1702,6 +1906,8 @@ async def _run_generation(
             selected_actions=result.get("selected_actions", selected_actions),
             resource_preview_paths=result.get("resource_preview_paths", []),
             resource_frame_meta=result.get("resource_frame_meta", []),
+            sequence_contract=result.get("sequence_contract", {}),
+            flagged_frame_count=flagged_frame_total,
             phase="building" if next_status == "ready_for_build" else "complete",
             checkpoint={
                 "stage": "building" if next_status == "ready_for_build" else "complete",
@@ -2052,6 +2258,12 @@ def _resource_preview_entries(
                     f"{quote(role, safe='')}/{index}/regenerate"
                 ),
             )
+        flags = item.get("quality_flags")
+        if isinstance(flags, list) and flags:
+            entry["quality_flags"] = [str(flag) for flag in flags]
+            entry["quality_notes"] = [
+                REASON_LABELS.get(str(flag), str(flag)) for flag in flags
+            ]
         entries.append(entry)
     return entries
 

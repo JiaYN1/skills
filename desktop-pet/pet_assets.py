@@ -8,7 +8,7 @@ only uses Pillow here for alpha cleanup, cropping, and frame alignment.
 from collections import deque
 from io import BytesIO
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def _clean_alpha_edges(image, minimum_alpha: int = 8):
@@ -402,6 +402,18 @@ def _working_alpha(alpha, work_size: int):
     return alpha.resize(size, Image.Resampling.BOX), factor
 
 
+def _alpha_masses(masks: Sequence[Any]) -> List[float]:
+    """Return the total alpha mass of every frame.
+
+    Mass tracks the body area and barely reacts to a thin limb, so it is a much
+    better body-size signal than a bounding box that a stretched leg inflates.
+    """
+
+    from PIL import ImageStat
+
+    return [float(ImageStat.Stat(mask).sum[0]) for mask in masks]
+
+
 def _overlap_cost(reference, moving, dx: int, dy: int) -> float:
     """Return the mean absolute alpha difference after shifting ``moving``."""
 
@@ -434,12 +446,13 @@ def _parabolic_peak(reference, moving, offset: Tuple[int, int], axis: int) -> fl
 
 
 def _best_overlap_offset(reference, moving, radius: int, center: Tuple[int, int]):
-    """Return the offset that overlaps ``moving`` on ``reference`` best.
+    """Return the best overlap offset and its residual cost.
 
     Scoring the alpha overlap is dominated by the body, because a torso covers
     far more pixels than a leg or a tail. That makes overlap a stable alignment
     signal even while the limbs swing, unlike a bounding box whose center and
-    bottom follow the limbs.
+    bottom follow the limbs. The residual cost doubles as a quality metric: a
+    frame that no longer matches the reference pose cannot be aligned cheaply.
     """
 
     best_offset = (0, 0)
@@ -450,46 +463,53 @@ def _best_overlap_offset(reference, moving, radius: int, center: Tuple[int, int]
             if best_score is None or score < best_score:
                 best_score = score
                 best_offset = (dx, dy)
-    return (
+    refined = (
         best_offset[0] + _parabolic_peak(reference, moving, best_offset, 0),
         best_offset[1] + _parabolic_peak(reference, moving, best_offset, 1),
     )
+    return refined, float(best_score or 0.0)
 
 
 def _sequence_alignments(
     masks: Sequence[Any],
     boxes: Sequence[Tuple[int, int, int, int]],
     align: bool = True,
+    reference_index: Optional[int] = None,
 ):
-    """Return per-frame source-pixel offsets that align the sequence, plus the
-    reference frame index.
+    """Return per-frame alignment, the reference frame, and each residual cost.
 
     Offsets are measured in the source coordinate frame (not inside each tight
     crop, where every frame would look centered), by maximizing the alpha
-    overlap against the median-area reference pose. Overlap is dominated by the
-    torso, so a swinging leg or tail barely moves the result, while a bounding
-    box follows the limbs exactly.
+    overlap against the reference pose. Overlap is dominated by the torso, so a
+    swinging leg or tail barely moves the result, while a bounding box follows
+    the limbs exactly.
 
     ``align=False`` is for callers whose frames have no shared source canvas
     (loose still photos of different sizes): there is nothing to register them
     against, so each frame is anchored by its own alpha box instead, which keeps
     the shared scale without inventing a translation out of unrelated photos.
+
+    ``reference_index`` pins the reference frame, which is how an edit keeps the
+    rest of a sequence exactly where it was.
     """
 
     from PIL import Image
 
     areas = [(box[2] - box[0]) * (box[3] - box[1]) for box in boxes]
-    reference_index = min(
-        range(len(areas)),
-        key=lambda index: abs(areas[index] - _median(areas)),
-    )
+    if reference_index is None or not 0 <= int(reference_index) < len(boxes):
+        reference_index = min(
+            range(len(areas)),
+            key=lambda index: abs(areas[index] - _median(areas)),
+        )
+    reference_index = int(reference_index)
     if not align:
         reference_box = boxes[reference_index]
-        return [
+        offsets = [
             (reference_box[0] - box[0], reference_box[1] - box[1]) for box in boxes
-        ], reference_index
+        ]
+        return offsets, reference_index, [0.0 for _ in masks]
     if len(masks) < 2:
-        return [(0, 0) for _ in masks], reference_index
+        return [(0, 0) for _ in masks], reference_index, [0.0 for _ in masks]
 
     extent = (
         max(box[2] for box in boxes),
@@ -502,6 +522,7 @@ def _sequence_alignments(
         absolute.append(layer)
 
     offsets: List[Tuple[int, int]] = [(0, 0) for _ in masks]
+    costs: List[float] = [0.0 for _ in masks]
     coarse_reference, coarse_factor = _working_alpha(absolute[reference_index], ALIGN_COARSE_SIZE)
     fine_reference, fine_factor = _working_alpha(absolute[reference_index], ALIGN_FINE_SIZE)
     reference_box = boxes[reference_index]
@@ -522,7 +543,7 @@ def _sequence_alignments(
             round((reference_center[1] - (box[1] + box[3]) / 2.0) / coarse_factor),
         )
         coarse, _ = _working_alpha(mask, ALIGN_COARSE_SIZE)
-        coarse_offset = _best_overlap_offset(
+        coarse_offset, _coarse_cost = _best_overlap_offset(
             coarse_reference, coarse, ALIGN_COARSE_RADIUS, guess
         )
         fine, _ = _working_alpha(mask, ALIGN_FINE_SIZE)
@@ -530,14 +551,15 @@ def _sequence_alignments(
             round(coarse_offset[0] * coarse_factor / fine_factor),
             round(coarse_offset[1] * coarse_factor / fine_factor),
         )
-        fine_offset = _best_overlap_offset(
+        fine_offset, fine_cost = _best_overlap_offset(
             fine_reference, fine, ALIGN_FINE_RADIUS, fine_center
         )
         offsets[index] = (
             int(round(fine_offset[0] * fine_factor)),
             int(round(fine_offset[1] * fine_factor)),
         )
-    return offsets, reference_index
+        costs[index] = max(0.0, float(fine_cost))
+    return offsets, reference_index, costs
 
 
 def normalize_pet_image(
@@ -612,6 +634,8 @@ def normalize_pet_sequence(
     anchor: str = "center",
     subject_scale: float = 1.0,
     require_transparency: bool = False,
+    report: Optional[Dict[str, Any]] = None,
+    contract: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Normalize a complete action sequence with one shared render contract.
 
@@ -638,6 +662,15 @@ def normalize_pet_sequence(
     A frame whose pose is a genuine outlier for the sequence can therefore end up
     clipped at the canvas edge, but it is never rescaled or nudged on its own:
     deleting or regenerating such a frame is a QA decision, not a scaling one.
+
+    ``report``, when a dict is passed, is filled with the measured numbers of
+    this run (render scale, reference frame, per-frame mass, registration
+    offset, registration residual, clipped flag, and the placements a later edit
+    can reuse). ``contract`` is the previous report of the same sequence:
+    passing it pins the render scale and the reference frame, so editing one
+    frame of a role leaves every other frame exactly where it was instead of
+    rescaling the whole action. A pinned run never rescales or shifts the other
+    frames; it only reports what it had to clip.
     """
 
     from PIL import Image
@@ -671,34 +704,80 @@ def normalize_pet_sequence(
     boxes = [box for _image, box, _size in prepared]
     source_sizes = {size for _image, _box, size in prepared}
     masks = [image.getchannel("A") for image in images]
+
+    pinned_scale: Optional[float] = None
+    pinned_reference: Optional[int] = None
+    stored_placements: List[Any] = []
+    frozen_base: Optional[Tuple[int, int]] = None
+    if isinstance(contract, dict):
+        try:
+            candidate_scale = float(contract.get("render_scale"))
+            if candidate_scale > 0:
+                pinned_scale = candidate_scale
+        except (TypeError, ValueError):
+            pinned_scale = None
+        candidate_index = contract.get("reference_index")
+        if isinstance(candidate_index, int):
+            pinned_reference = candidate_index
+        stored = contract.get("placements")
+        if isinstance(stored, (list, tuple)):
+            stored_placements = list(stored)
+        stored_canvas = contract.get("canvas_size")
+        if stored_canvas is not None and int(stored_canvas or 0) != int(canvas_size):
+            # The pinned geometry belongs to a different canvas size.
+            pinned_scale = None
+            frozen_base = None
+        elif (
+            pinned_scale is not None
+            and pinned_reference is not None
+            and 0 <= pinned_reference < len(stored_placements)
+            and isinstance(stored_placements[pinned_reference], (list, tuple))
+            and len(stored_placements[pinned_reference]) == 2
+        ):
+            # The reference frame's own placement *is* the anchor position, so
+            # freezing it keeps the whole sequence in place even when the edited
+            # frame happens to be the reference frame itself.
+            reference_placement = stored_placements[pinned_reference]
+            frozen_base = (int(reference_placement[0]), int(reference_placement[1]))
+
     # Generated action frames all arrive on one shared 1024x1024 canvas, where
     # registration is meaningful. Loose still photos of unrelated sizes have no
     # shared frame to align in, so they only get the shared scale.
-    alignments, reference_index = _sequence_alignments(
-        masks, boxes, align=len(source_sizes) == 1
+    alignments, reference_index, alignment_costs = _sequence_alignments(
+        masks,
+        boxes,
+        align=len(source_sizes) == 1,
+        reference_index=pinned_reference,
     )
     reference_box = boxes[reference_index]
 
     # One render scale for every frame: the median pose defines how large the
-    # pet should be, and a small source photo is never blown up into mush.
+    # pet should be, and a small source photo is never blown up into mush. A
+    # pinned contract reuses the scale an earlier run already shipped.
     fit_scale = _median(
         [
             target_extent / max(1, max(box[2] - box[0], box[3] - box[1]))
             for box in boxes
         ]
     )
-    render_scale = max(0.01, min(fit_scale, MAX_UPSCALE))
+    if pinned_scale is not None:
+        render_scale = max(0.01, pinned_scale)
+    else:
+        render_scale = max(0.01, min(fit_scale, MAX_UPSCALE))
 
     def place_all(scale: float):
         reference_width = max(1, round((reference_box[2] - reference_box[0]) * scale))
         reference_height = max(1, round((reference_box[3] - reference_box[1]) * scale))
-        base_left = (canvas_size - reference_width) // 2
-        if bottom_anchor:
-            base_top = canvas_size - padding - reference_height
-        elif top_anchor:
-            base_top = padding
+        if frozen_base is not None:
+            base_left, base_top = frozen_base
         else:
-            base_top = (canvas_size - reference_height) // 2
+            base_left = (canvas_size - reference_width) // 2
+            if bottom_anchor:
+                base_top = canvas_size - padding - reference_height
+            elif top_anchor:
+                base_top = padding
+            else:
+                base_top = (canvas_size - reference_height) // 2
         placements = []
         for index, box in enumerate(boxes):
             width = max(1, round((box[2] - box[0]) * scale))
@@ -720,30 +799,83 @@ def normalize_pet_sequence(
 
     # A single stretched pose can make the whole sequence too large to fit at
     # the median scale. Shrink everything by one shared factor instead of
-    # shrinking the outlier alone.
-    for _ in range(3):
-        placements, union = place_all(render_scale)
-        union_width = union[2] - union[0]
-        union_height = union[3] - union[1]
-        available = canvas_size - CANVAS_MARGIN * 2
-        if union_width <= available and union_height <= available:
-            break
-        render_scale *= available / max(1, union_width, union_height)
-        render_scale = max(0.01, render_scale)
+    # shrinking the outlier alone. A pinned run may not do that: the whole point
+    # of an edit is that the other frames keep the placement they already have,
+    # so an oversized new frame is reported as clipped instead.
+    if pinned_scale is None:
+        for _ in range(3):
+            placements, union = place_all(render_scale)
+            union_width = union[2] - union[0]
+            union_height = union[3] - union[1]
+            available = canvas_size - CANVAS_MARGIN * 2
+            if union_width <= available and union_height <= available:
+                break
+            render_scale *= available / max(1, union_width, union_height)
+            render_scale = max(0.01, render_scale)
 
     placements, union = place_all(render_scale)
     # Keep the sequence inside the canvas with one shared nudge, preserving the
     # relative placement of every frame.
     shift_x = 0
     shift_y = 0
-    if union[0] < CANVAS_MARGIN:
-        shift_x = CANVAS_MARGIN - union[0]
-    elif union[2] > canvas_size - CANVAS_MARGIN:
-        shift_x = canvas_size - CANVAS_MARGIN - union[2]
-    if union[1] < CANVAS_MARGIN:
-        shift_y = CANVAS_MARGIN - union[1]
-    elif union[3] > canvas_size - CANVAS_MARGIN:
-        shift_y = canvas_size - CANVAS_MARGIN - union[3]
+    if pinned_scale is None:
+        if union[0] < CANVAS_MARGIN:
+            shift_x = CANVAS_MARGIN - union[0]
+        elif union[2] > canvas_size - CANVAS_MARGIN:
+            shift_x = canvas_size - CANVAS_MARGIN - union[2]
+        if union[1] < CANVAS_MARGIN:
+            shift_y = CANVAS_MARGIN - union[1]
+        elif union[3] > canvas_size - CANVAS_MARGIN:
+            shift_y = canvas_size - CANVAS_MARGIN - union[3]
+
+    final_placements = [
+        (left + shift_x, top + shift_y) for left, top, _width, _height in placements
+    ]
+    clipped = [
+        left < 0
+        or top < 0
+        or left + placements[index][2] > canvas_size
+        or top + placements[index][3] > canvas_size
+        for index, (left, top) in enumerate(final_placements)
+    ]
+    if report is not None:
+        report.clear()
+        report.update(
+            {
+                "canvas_size": canvas_size,
+                "anchor": normalized_anchor,
+                "render_scale": round(render_scale, 6),
+                "reference_index": int(reference_index),
+                "pinned": pinned_scale is not None,
+                "frames": [
+                    {
+                        "index": index,
+                        "box": [int(value) for value in box],
+                        "mass": float(mask_sum),
+                        "alignment": [int(alignments[index][0]), int(alignments[index][1])],
+                        "alignment_cost": round(alignment_costs[index], 4),
+                        "clipped": bool(clipped[index]),
+                    }
+                    for index, (box, mask_sum) in enumerate(
+                        zip(boxes, _alpha_masses(masks))
+                    )
+                ],
+                "placements": [[int(left), int(top)] for left, top in final_placements],
+            }
+        )
+        if stored_placements:
+            drifted = [
+                index
+                for index, (left, top) in enumerate(final_placements)
+                if index < len(stored_placements)
+                and isinstance(stored_placements[index], (list, tuple))
+                and len(stored_placements[index]) == 2
+                and (
+                    abs(int(stored_placements[index][0]) - left) > 1
+                    or abs(int(stored_placements[index][1]) - top) > 1
+                )
+            ]
+            report["contract_drift"] = drifted
 
     for image, (left, top, width, height), destination in zip(
         images, placements, destination_paths

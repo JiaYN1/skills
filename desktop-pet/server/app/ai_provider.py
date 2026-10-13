@@ -140,8 +140,18 @@ class OpenAICompatibleImageProvider:
         frame_count: Optional[int] = None,
         pose_consistency: Optional[bool] = None,
         continuity_reference: bool = False,
+        next_reference: bool = False,
+        quality_hint: str = "",
     ) -> Path:
-        """Generate exactly one transparent action frame."""
+        """Generate exactly one transparent action frame.
+
+        ``continuity_reference`` marks the last input image as the preceding
+        frame; ``next_reference`` additionally marks it as the frame *after* the
+        one being generated, which is how a frame inserted between two existing
+        frames is asked to sit strictly between them instead of inventing an
+        arbitrary pose. ``quality_hint`` is the reason the previous attempt was
+        rejected by the frame quality check.
+        """
 
         if not self.available:
             raise ImageGenerationError("AI 图像服务未配置，无法生成动作帧")
@@ -165,6 +175,8 @@ class OpenAICompatibleImageProvider:
             frame_index=index,
             pose=pose,
             continuity_reference=continuity_reference,
+            next_reference=next_reference,
+            quality_hint=quality_hint,
         )
         reference_paths = self._reference_paths(references, identity_reference)
         reference_paths = reference_paths[: self.settings.ai_max_references]
@@ -328,6 +340,8 @@ class OpenAICompatibleImageProvider:
         frame_index: Optional[int] = None,
         pose: Optional[str] = None,
         continuity_reference: bool = False,
+        next_reference: bool = False,
+        quality_hint: str = "",
     ) -> str:
         action = ROLE_PROMPTS.get(role, ROLE_PROMPTS["idle"])
         count = frame_count_for_role(role, frame_count)
@@ -362,13 +376,29 @@ class OpenAICompatibleImageProvider:
                 if pose_consistency
                 else "Keep the animal recognizable, full-body, and consistent with the reference images."
             )
-        continuity = (
-            " The last input image is the immediately preceding animation frame. Treat it as the temporal "
-            "anchor: make only the smallest pose change needed for this frame, preserve the same silhouette "
-            "and landmarks, and never redesign the pet."
-            if continuity_reference
-            else ""
-        )
+        if continuity_reference and next_reference:
+            continuity = (
+                " The last two input images are the immediately preceding animation frame and the "
+                "immediately following animation frame. Treat them as the two temporal anchors: the "
+                "preceding one comes first and the following one second. Generate the single frame that "
+                "belongs strictly between them, halfway through the motion, preserving the same "
+                "silhouette landmarks, the same body size, and the same ground contact. Never redesign "
+                "the pet and never pick a different pose from the one the two anchors bracket."
+            )
+        elif continuity_reference:
+            continuity = (
+                " The last input image is the immediately preceding animation frame. Treat it as the temporal "
+                "anchor: make only the smallest pose change needed for this frame, preserve the same silhouette "
+                "and landmarks, and never redesign the pet."
+            )
+        elif next_reference:
+            continuity = (
+                " The last input image is the animation frame that comes immediately after this one. "
+                "Generate the frame that leads into it, preserving the same silhouette, body size, and "
+                "ground contact, and never redesign the pet."
+            )
+        else:
+            continuity = ""
         background = (
             "Output settings: transparent background enabled. Prefer the image model's native "
             "transparent-background mode and return a PNG with a fully transparent background, "
@@ -385,6 +415,16 @@ class OpenAICompatibleImageProvider:
                 " The API request may omit the background parameter for model compatibility, but "
                 "the transparent-background output setting still applies to the prompt."
             )
+        retry = ""
+        if str(quality_hint or "").strip():
+            # The previous attempt failed the local frame quality check; say so
+            # and name the metric that broke, so the model corrects that and
+            # nothing else.
+            retry = (
+                " This is a retry: the previous attempt for this exact frame was rejected by an "
+                f"automatic frame check because {str(quality_hint).strip()}. Fix only that, and keep "
+                "the body size, colours, camera, and ground contact identical to the reference images."
+            )
         return (
             "Use case: identity-preserve. Asset type: a frame-by-frame 2D desktop-pet animation. "
             "Input images: Image 1 is the identity reference; later images are pose references only. "
@@ -396,7 +436,9 @@ class OpenAICompatibleImageProvider:
             "baseline near the lower edge. Do not zoom, pan, change the camera, or change lighting. "
             f"The action is {action}. {frame_request} "
             f"{background} Keep clean anti-aliased edges, no text, no frame, no room, no people, "
-            "no watermark, no shadow, and no extra animals."
+            "no watermark, no shadow, and no extra animals. Never draw ghosting, afterimages, motion "
+            "trails, echo copies, or two overlapping silhouettes of the same pet, never draw extra or "
+            f"duplicated limbs, and never return a contact sheet, multi-panel grid, or cell borders.{retry}"
         )
 
     @staticmethod
