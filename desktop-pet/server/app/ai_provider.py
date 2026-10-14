@@ -12,6 +12,17 @@ import httpx
 
 from .config import Settings
 
+#: Known image-generation model names. Gateways disagree about what they serve,
+#: so this only seeds the picker when ``/models`` cannot be read; the value the
+#: account stores is free-form and is what actually goes into every request.
+KNOWN_IMAGE_MODELS: Tuple[str, ...] = (
+    "gpt-image-1",
+    "gpt-image-1-mini",
+    "gpt-image-1.5",
+    "gpt-image-2",
+    "dall-e-3",
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -49,6 +60,48 @@ class OpenAICompatibleImageProvider:
     @property
     def available(self) -> bool:
         return self.settings.ai_enabled and bool(self.settings.ai_api_key)
+
+    async def list_models(self) -> Dict[str, Any]:
+        """Return the image models the configured gateway advertises.
+
+        The gateway is the authority on what it serves, so it is asked first;
+        the known model names are only a fallback so the picker is never empty
+        and always allows a custom name. This never raises: a configuration
+        problem should surface as a hint in the UI, not as a failed page load.
+        """
+
+        current = str(self.settings.ai_image_model or "").strip()
+        builtin = {"models": list(KNOWN_IMAGE_MODELS), "source": "builtin"}
+        if not self.available:
+            return {**builtin, "current": current, "error": "尚未配置 API Key，以下是内置常用模型"}
+
+        url = f"{self.settings.ai_api_base_url}/models"
+        headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
+        try:
+            async with httpx.AsyncClient(
+                timeout=min(30, max(5, self.settings.ai_timeout_seconds))
+            ) as client:
+                response = await client.get(url, headers=headers)
+            if response.status_code >= 400:
+                raise ImageGenerationError(f"网关返回 {response.status_code}")
+            payload = response.json()
+        except Exception as error:  # noqa: BLE001 - any failure means "no list"
+            return {**builtin, "current": current, "error": f"无法读取模型列表：{error}"}
+
+        models = []
+        for item in payload.get("data", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("id") or "").strip()
+            if name and name not in models:
+                models.append(name)
+        models.sort()
+        if not models:
+            return {**builtin, "current": current, "error": "网关没有返回任何模型"}
+        if current and current not in models:
+            # Keep the model the account actually uses selectable.
+            models.insert(0, current)
+        return {"models": models, "source": "gateway", "current": current, "error": ""}
 
     async def generate_action_frames(
         self,

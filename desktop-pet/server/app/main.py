@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from .ai_provider import GenerationCancelled, ImageGenerationError, OpenAICompatibleImageProvider
 from .auth import AuthStoreError, SESSION_COOKIE, SESSION_TTL_DAYS, UserStore
-from .config import settings
+from .config import normalize_model_name, settings
 from .package_builder import BuildCancelled, ROLE_ANCHORS, ai_cutout_frame, build_pet_package
 from .storage import JobStore
 
@@ -73,6 +73,7 @@ class AISettingsUpdate(BaseModel):
     frame_repeat: Optional[int] = Field(default=None, ge=1, le=4)
     walk_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
     sleep_frame_count: Optional[int] = Field(default=None, ge=1, le=24)
+    atlas_mode: Optional[str] = None
 
 
 class AuthCredentials(BaseModel):
@@ -84,6 +85,7 @@ class GenerateFromPreviewRequest(BaseModel):
     name: Optional[str] = None
     build_exe: bool = False
     selected_actions: Optional[List[str]] = None
+    image_model: Optional[str] = None
 
 
 class RemoveResourceFramesRequest(BaseModel):
@@ -182,6 +184,24 @@ def get_ai_settings(
     return result
 
 
+@app.get("/api/ai/models")
+async def list_ai_models(
+    session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """List the image models the configured gateway advertises.
+
+    Never fails: when the gateway cannot be asked (no key, network error, or an
+    endpoint that does not implement ``/models``), the known model names come
+    back with the reason, so the picker always has candidates and the user can
+    still type a custom one.
+    """
+
+    context = _request_context(session_id, x_admin_token)
+    model_settings = settings.with_ai_snapshot(_ai_snapshot_for_context(context))
+    return await OpenAICompatibleImageProvider(model_settings).list_models()
+
+
 @app.put("/api/settings/ai")
 def update_ai_settings(
     payload: AISettingsUpdate,
@@ -210,6 +230,7 @@ async def prepare_pet(
     photos: List[UploadFile] = File(...),
     name: str = Form("我的宠物"),
     selected_actions: Optional[List[str]] = Form(default=None),
+    image_model: Optional[str] = Form(default=None),
     session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
     x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
@@ -229,7 +250,7 @@ async def prepare_pet(
         selected_actions,
         owner_id=context["id"],
         owner_name=context["username"],
-        ai_config=_ai_snapshot_for_context(context),
+        ai_config=_ai_snapshot_for_context(context, _normalize_model_name(image_model)),
     )
     job_id = record["id"]
     try:
@@ -255,6 +276,7 @@ async def generate_pet(
     name: str = Form("我的宠物"),
     build_exe: bool = Form(False),
     selected_actions: Optional[List[str]] = Form(default=None),
+    image_model: Optional[str] = Form(default=None),
     session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
     x_admin_token: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
@@ -271,7 +293,7 @@ async def generate_pet(
         selected_actions,
         owner_id=context["id"],
         owner_name=context["username"],
-        ai_config=_ai_snapshot_for_context(context),
+        ai_config=_ai_snapshot_for_context(context, _normalize_model_name(image_model)),
     )
     job_id = record["id"]
     try:
@@ -322,16 +344,23 @@ def generate_from_preview(
         else record.get("selected_actions")
     )
     build_exe = bool(payload.build_exe or record.get("build_exe", False))
-    store.update(
-        job_id,
-        name=name,
-        build_exe=build_exe,
-        selected_actions=selected_actions,
-        status="processing",
-        progress=5,
-        message="已确认去背景预览，正在生成动作资源",
-        error="",
-    )
+    changes: Dict[str, Any] = {
+        "name": name,
+        "build_exe": build_exe,
+        "selected_actions": selected_actions,
+        "status": "processing",
+        "progress": 5,
+        "message": "已确认去背景预览，正在生成动作资源",
+        "error": "",
+    }
+    model_override = _normalize_model_name(payload.image_model)
+    if model_override:
+        # Switching the model after the preview gives the user one last chance to
+        # pick a different one for the expensive part of the job.
+        snapshot = dict(record.get("ai_config") or {})
+        snapshot["ai_image_model"] = model_override
+        changes["ai_config"] = snapshot
+    store.update(job_id, **changes)
     background_tasks.add_task(
         _run_generation,
         job_id,
@@ -2150,6 +2179,12 @@ def _public_job(
     result.pop("ai_config", None)
     owner_id = result.pop("owner_id", None)
     owner_name = result.pop("owner_name", None)
+    # The model that produced (or will produce) this task's frames. It comes from
+    # the per-task snapshot, so it stays accurate even after the account setting
+    # changes, and it is what the UI shows next to the progress bar.
+    ai_config = record.get("ai_config")
+    if isinstance(ai_config, dict) and ai_config.get("ai_image_model"):
+        result["image_model"] = str(ai_config["ai_image_model"])
     if include_owner and owner_id:
         result["owner"] = {"id": owner_id, "username": owner_name or ""}
     if not include_events:
@@ -2325,12 +2360,26 @@ def _request_context(
     raise HTTPException(401, "请先登录")
 
 
-def _ai_snapshot_for_context(context: Dict[str, Any]) -> Dict[str, Any]:
-    if context.get("role") == "admin":
-        return settings.ai_snapshot()
-    if context.get("role") == "legacy":
-        return settings.ai_snapshot()
-    return user_store.get_ai_config(str(context["id"]))
+def _normalize_model_name(value: Optional[str]) -> Optional[str]:
+    """Validate a per-task model override, as an HTTP error when it is bad."""
+
+    try:
+        return normalize_model_name(value)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+
+
+def _ai_snapshot_for_context(
+    context: Dict[str, Any], image_model: Optional[str] = None
+) -> Dict[str, Any]:
+    if context.get("role") in {"admin", "legacy"}:
+        snapshot = settings.ai_snapshot()
+    else:
+        snapshot = user_store.get_ai_config(str(context["id"]))
+    if image_model:
+        snapshot = dict(snapshot or {})
+        snapshot["ai_image_model"] = image_model
+    return snapshot
 
 
 def _settings_for_job(record: Dict[str, Any]):

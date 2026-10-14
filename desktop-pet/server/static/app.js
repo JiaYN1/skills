@@ -336,6 +336,52 @@ function setAiSettingsStatus(message, isError = false) {
   aiSettingsStatus.classList.toggle("error", isError);
 }
 
+function fillModelOptions(models, current = "") {
+  const select = document.querySelector("#pet-model");
+  const datalist = document.querySelector("#ai-model-options");
+  select.replaceChildren();
+  datalist.replaceChildren();
+  const follow = document.createElement("option");
+  follow.value = "";
+  follow.textContent = current ? `跟随账号设置（${current}）` : "跟随账号设置";
+  select.append(follow);
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    select.append(option);
+    const suggestion = document.createElement("option");
+    suggestion.value = model;
+    datalist.append(suggestion);
+  }
+}
+
+async function loadModelOptions(button = null) {
+  const hint = document.querySelector("#ai-model-hint");
+  if (button) button.disabled = true;
+  try {
+    const response = await apiFetch("/api/ai/models");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "读取模型列表失败");
+    fillModelOptions(payload.models || [], payload.current || "");
+    if (hint) {
+      hint.textContent = payload.error
+        ? `${payload.error}（已列出内置常用模型，也可直接手填网关支持的模型名）`
+        : `已从网关读取 ${(payload.models || []).length} 个模型，当前账号使用 ${payload.current || "未设置"}。`;
+    }
+    return payload;
+  } catch (error) {
+    if (hint) hint.textContent = `读取模型列表失败：${error.message}`;
+    return null;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+document.querySelector("#ai-model-refresh").addEventListener("click", (event) => {
+  loadModelOptions(event.currentTarget);
+});
+
 function fillAiSettings(values) {
   document.querySelector("#ai-enabled").checked = Boolean(values.enabled);
   document.querySelector("#ai-base-url").value = values.api_base_url || "";
@@ -494,6 +540,7 @@ async function loadAiSettings() {
     if (!response.ok) throw new Error(payload.detail || "读取 AI 配置失败");
     fillAiSettings(payload);
     setAiSettingsStatus("已读取");
+    loadModelOptions();
   } catch (error) {
     setAiSettingsStatus(error.message || String(error), true);
   }
@@ -546,6 +593,10 @@ function showProgress(job) {
   percentText.textContent = `${percent}%`;
   barFill.style.width = `${percent}%`;
   messageText.textContent = job.message || "";
+  const modelHint = document.querySelector("#pet-model-hint");
+  if (job.image_model) {
+    modelHint.textContent = `本次任务实际使用的图像模型：${job.image_model}`;
+  }
   renderJobEvents(job.events || []);
   if (job.download_url) {
     download.href = job.download_url;
@@ -751,6 +802,7 @@ resumeGenerationButton.addEventListener("click", async () => {
       body: JSON.stringify({
         name: document.querySelector("#pet-name").value.trim(),
         selected_actions: selectedActions(),
+        image_model: document.querySelector("#pet-model").value,
       }),
     });
     const payload = await response.json();
@@ -829,6 +881,7 @@ confirmPreviewButton.addEventListener("click", async () => {
       body: JSON.stringify({
         name: document.querySelector("#pet-name").value.trim(),
         selected_actions: selectedActions(),
+        image_model: document.querySelector("#pet-model").value,
       }),
     });
     const payload = await response.json();

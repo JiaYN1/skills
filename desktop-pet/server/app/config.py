@@ -35,6 +35,27 @@ def _atlas_mode(value: Any, default: str = "auto") -> str:
     return mode if mode in {"auto", "on", "off"} else default
 
 
+def normalize_model_name(value: Any) -> "str | None":
+    """Validate an optional image-model name.
+
+    ``None`` or an empty value means "use whatever the account is configured
+    with", which is also what the picker offers as its default choice. Raises
+    ``ValueError`` for a name that cannot plausibly be a model id, so the API
+    layer can turn it into a 400 without this module knowing about HTTP.
+    """
+
+    if value is None:
+        return None
+    name = str(value).strip()
+    if not name:
+        return None
+    # The name becomes a JSON body field and, on some gateways, a
+    # header-sized string; keep it to something a model id can plausibly be.
+    if len(name) > 120 or any(character in name for character in "\r\n\t"):
+        raise ValueError("模型名称无效")
+    return name
+
+
 @dataclass
 class Settings:
     data_dir: Path
