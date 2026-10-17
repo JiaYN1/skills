@@ -8,8 +8,10 @@ case the service switches to a per-file strategy:
   configuration/dependency changes, then ordinary business code);
 * drop files that never deserve a review slot (tests, docs, lock files,
   generated or vendored code, assets, minified bundles);
-* keep at most ``LARGE_PR_MAX_FILES`` files and review them one at a time, so a
-  single request never carries the whole diff.
+* review the remaining files one at a time, so a single request never carries
+  the whole diff. Every business file is reviewed by default; set
+  ``LARGE_PR_MAX_FILES`` to a positive number to cap how many files are kept
+  (``0`` or unset means no limit).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from .diff_parser import ChangedFile, is_test_file
 
 
 DEFAULT_LARGE_PR_DIFF_LINES = 500
-DEFAULT_LARGE_PR_MAX_FILES = 5
+DEFAULT_LARGE_PR_MAX_FILES = 0
 DEFAULT_LARGE_PR_FILE_MAX_CHARS = 60000
 DEFAULT_LARGE_PR_CONCURRENCY = 2
 
@@ -99,7 +101,10 @@ GENERATED_NAME_RE = re.compile(r"(\.pb\.go|\.g\.dart|_pb2\.py|_pb2_grpc\.py|\.de
 
 @dataclass(slots=True)
 class ReviewPlan:
-    """How the changed files should be reviewed."""
+    """How the changed files should be reviewed.
+
+    ``file_limit`` is the configured cap, where ``0`` means unlimited.
+    """
 
     large: bool
     changed_lines: int
@@ -108,6 +113,10 @@ class ReviewPlan:
     selected: list[ChangedFile]
     selected_tiers: dict[str, str]
     skipped: list[tuple[str, str]]
+
+    @property
+    def unlimited(self) -> bool:
+        return self.file_limit <= 0
 
     @property
     def selected_paths(self) -> list[str]:
@@ -119,7 +128,13 @@ def large_pr_threshold() -> int:
 
 
 def large_pr_file_limit() -> int:
-    return _env_int("LARGE_PR_MAX_FILES", DEFAULT_LARGE_PR_MAX_FILES, minimum=1, maximum=100)
+    """Cap on the number of files reviewed in the large-PR strategy.
+
+    ``0`` (the default) means no limit: every file that is not excluded by
+    category (tests, docs, lock files, generated code, assets) is reviewed.
+    """
+
+    return _env_int("LARGE_PR_MAX_FILES", DEFAULT_LARGE_PR_MAX_FILES, minimum=0, maximum=100)
 
 
 def per_file_max_chars() -> int:
@@ -175,9 +190,12 @@ def build_review_plan(files: list[ChangedFile]) -> ReviewPlan:
     # Importance tier dominates; within a tier the most-changed file goes first.
     ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
 
-    selected_entries = ranked[:limit]
-    for _, _, _, file in ranked[limit:]:
-        skipped.append((file.new_path, REASON_LIMIT))
+    if limit > 0:
+        selected_entries = ranked[:limit]
+        for _, _, _, file in ranked[limit:]:
+            skipped.append((file.new_path, REASON_LIMIT))
+    else:
+        selected_entries = ranked
 
     selected = [entry[3] for entry in selected_entries]
     for tier, _, path, _ in selected_entries:

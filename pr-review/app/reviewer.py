@@ -198,9 +198,10 @@ def _large_pr_notice(plan: ReviewPlan) -> str:
     details = "、".join(
         f"{path}（{plan.selected_tiers.get(path, '业务代码')}）" for path in plan.selected_paths
     )
+    prefix = "全部" if plan.unlimited else "最关键的"
     return (
         f"检测到大 PR：本次变更 {plan.changed_lines} 行（阈值 {plan.threshold} 行），"
-        f"已改为逐文件检视最关键的 {len(plan.selected)} 个文件：{details}。"
+        f"已改为逐文件检视{prefix} {len(plan.selected)} 个文件：{details}。"
     )
 
 

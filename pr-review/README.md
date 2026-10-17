@@ -75,7 +75,7 @@ curl --fail http://localhost:19986/api/health
 - `OPENAI_BASE_URL`: 可选，默认 `https://api.openai.com/v1`，可指向兼容 Chat Completions 的服务。
 - `MAX_DIFF_CHARS`: 可选，默认 `120000`；小 PR 单次发给模型的 diff 上限。
 - `LARGE_PR_DIFF_LINES`: 可选，默认 `500`；变更行数（新增 + 删除）超过该值时启用大 PR 策略。
-- `LARGE_PR_MAX_FILES`: 可选，默认 `5`；大 PR 策略下最多检视的文件数。
+- `LARGE_PR_MAX_FILES`: 可选，默认 `0`；大 PR 策略下最多检视的文件数。`0` 表示不限制，所有业务代码都会被检视；设为正数才会限制文件数上限。
 - `LARGE_PR_FILE_MAX_CHARS`: 可选，默认 `60000`；大 PR 策略下单文件 diff 的上限。
 - `LARGE_PR_CONCURRENCY`: 可选，默认 `2`；大 PR 逐文件检视的并发数。
 - `DUPLICATE_SIMILARITY_THRESHOLD`: 可选，默认 `0.7`；判定"疑似重复意见"的正文相似度阈值，调到 `1.0` 相当于只信指纹。
@@ -94,7 +94,7 @@ curl --fail http://localhost:19986/api/health
 
 1. 对每个变更文件分级：接口定义（`.h`/`.hpp`/`.proto`/`api`、`routes`、`controllers` 等）、配置与依赖（`*.yaml`/`*.toml`/`Dockerfile`/`requirements*.txt` 等）优先于普通业务代码；
 2. 测试、文档、锁文件、生成代码、第三方目录、资源与多语言文件不占用检视名额；
-3. 同级文件按变更行数排序，最多取 `LARGE_PR_MAX_FILES`（默认 5）个；
+3. **默认不限制文件数**，所有业务代码（含接口、配置）都会被检视；同级文件按变更行数排序。若把 `LARGE_PR_MAX_FILES` 设为正数，则只检视排序后的前 N 个文件；
 4. 每个文件单独调用一次模型（默认并发 `LARGE_PR_CONCURRENCY=2`），单文件 diff 超过 `LARGE_PR_FILE_MAX_CHARS` 时只截断该文件。
 
 返回结果的 `warnings` 会说明本次选了哪些文件（含分级）以及未检视的文件数量与原因；某个文件调用失败只跳过该文件，不影响其余文件。

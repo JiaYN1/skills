@@ -234,10 +234,10 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
 
         plan = build_review_plan(self.files)
         self.assertEqual([path for path, _ in calls], plan.selected_paths)
-        self.assertEqual(len(calls), plan.file_limit)
-        self.assertEqual(len(comments), plan.file_limit)
+        self.assertEqual(len(calls), len(plan.selected))
+        self.assertEqual(len(comments), len(plan.selected))
         self.assertTrue(all(comment.publishable for comment in comments))
-        self.assertEqual(summary.total, plan.file_limit)
+        self.assertEqual(summary.total, len(plan.selected))
 
         # 每次调用只带一个文件的 diff，测试文件不占用名额
         for focus_path, annotated in calls:
@@ -266,7 +266,7 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
             comments, _, warnings = await generate_review(self.data)
 
         self.assertNotIn("src/core.py", [comment.file_path for comment in comments])
-        self.assertEqual(len(comments), 4)
+        self.assertEqual(len(comments), 5)
         self.assertTrue(any("src/core.py 审查失败" in warning for warning in warnings))
 
     async def test_repeated_findings_in_one_run_are_removed(self):
@@ -277,8 +277,8 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         with patch("app.reviewer._call_llm", new=fake_call):
             comments, _, _ = await generate_review(self.data)
 
-        self.assertEqual(len(comments), 5)
-        self.assertEqual(len({comment.file_path for comment in comments}), 5)
+        self.assertEqual(len(comments), 6)
+        self.assertEqual(len({comment.file_path for comment in comments}), 6)
 
     async def test_already_posted_comments_are_flagged(self):
         async def fake_call(data, annotated_diff, model=None, focus_path=None):

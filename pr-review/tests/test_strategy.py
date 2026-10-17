@@ -82,9 +82,10 @@ class LargePrTest(unittest.TestCase):
         self.assertTrue(plan.large)
         self.assertGreater(plan.changed_lines, plan.threshold)
 
-    def test_only_the_five_most_important_files_are_selected(self):
+    def test_all_reviewable_files_are_selected_by_default(self):
         plan = self.build_plan()
 
+        # 默认不限制文件数：接口、配置、业务代码全部检视。
         self.assertEqual(
             plan.selected_paths,
             [
@@ -93,6 +94,8 @@ class LargePrTest(unittest.TestCase):
                 "config/prod.yaml",
                 "deploy/k8s/deployment.yaml",
                 "src/core.py",
+                "src/utils.py",
+                "src/legacy.py",
             ],
         )
 
@@ -101,7 +104,7 @@ class LargePrTest(unittest.TestCase):
 
         self.assertEqual(
             [plan.selected_tiers[path] for path in plan.selected_paths],
-            ["接口定义", "接口定义", "配置/依赖", "配置/依赖", "业务代码"],
+            ["接口定义", "接口定义", "配置/依赖", "配置/依赖", "业务代码", "业务代码", "业务代码"],
         )
         self.assertEqual((TIER_INTERFACE, TIER_CONFIG, TIER_BUSINESS), (3, 2, 1))
 
@@ -113,14 +116,22 @@ class LargePrTest(unittest.TestCase):
         self.assertEqual(reasons["docs/guide.md"], REASON_DOC)
         self.assertEqual(reasons["poetry.lock"], REASON_LOCK)
         self.assertEqual(reasons["vendor/lib/mod.py"], REASON_GENERATED)
-        self.assertEqual(reasons["src/utils.py"], REASON_LIMIT)
+        self.assertNotIn("src/utils.py", reasons)
         self.assertNotIn("src/core.py", reasons)
 
     def test_limit_is_configurable(self):
         with patch.dict("os.environ", {"LARGE_PR_MAX_FILES": "2"}):
             plan = self.build_plan()
+            reasons = dict(plan.skipped)
 
         self.assertEqual(plan.selected_paths, ["app/api/router.py", "include/service.h"])
+        self.assertEqual(reasons["src/utils.py"], REASON_LIMIT)
+
+    def test_zero_means_no_limit(self):
+        with patch.dict("os.environ", {"LARGE_PR_MAX_FILES": "0"}):
+            plan = self.build_plan()
+
+        self.assertEqual(len(plan.selected), 7)
 
     def test_threshold_is_configurable(self):
         with patch.dict("os.environ", {"LARGE_PR_DIFF_LINES": "5000"}):
@@ -135,7 +146,7 @@ class LargePrTest(unittest.TestCase):
             plan = self.build_plan()
 
         self.assertTrue(plan.large)
-        self.assertEqual(len(plan.selected), 5)
+        self.assertEqual(len(plan.selected), 7)
 
 
 if __name__ == "__main__":
