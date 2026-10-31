@@ -132,7 +132,9 @@ async def generate_review(
         comments, warnings = await _generate_single_review(data, plan, model=model)
 
     comments = deduplicate_within_batch(comments)
-    comments, duplicates, suspects = mark_already_reported(comments, existing or [])
+    comments, duplicates, suspects = mark_already_reported(
+        comments, existing or [], fallback_url=data.ref.web_url
+    )
     if duplicates:
         warnings.append(
             f"其中 {len(duplicates)} 条意见已存在于该 PR/MR，已标记为不重复发布。"
@@ -172,18 +174,24 @@ async def _generate_large_review(
     budget = per_file_max_chars()
     semaphore = asyncio.Semaphore(large_pr_concurrency())
 
-    async def review_one(file: ChangedFile) -> tuple[list[ReviewComment], list[str], str | None]:
+    async def review_one(
+        file: ChangedFile, client: httpx.AsyncClient
+    ) -> tuple[list[ReviewComment], list[str], str | None]:
         async with semaphore:
             annotated_diff, file_warnings = render_file_annotated_diff(file, budget)
             if not annotated_diff.strip():
                 return [], file_warnings, None
             try:
-                raw_result = await _call_llm(data, annotated_diff, model=model, focus_path=file.new_path)
+                raw_result = await _call_llm(
+                    data, annotated_diff, model=model, focus_path=file.new_path, client=client
+                )
             except ReviewError as exc:
                 return [], file_warnings, f"{file.new_path} 审查失败，已跳过该文件：{exc}"
             return _normalize_comments(raw_result.get("comments", []), [file]), file_warnings, None
 
-    results = await asyncio.gather(*(review_one(file) for file in plan.selected))
+    # 一个连接池跑完所有文件，避免每个文件都重新握手（建 SSL 上下文约 0.3 秒）。
+    async with _new_client() as client:
+        results = await asyncio.gather(*(review_one(file, client) for file in plan.selected))
 
     comments: list[ReviewComment] = []
     for file_comments, file_warnings, error in results:
@@ -199,8 +207,11 @@ def _large_pr_notice(plan: ReviewPlan) -> str:
         f"{path}（{plan.selected_tiers.get(path, '业务代码')}）" for path in plan.selected_paths
     )
     prefix = "全部" if plan.unlimited else "最关键的"
+    basis = f"可检视变更 {plan.changed_lines} 行"
+    if plan.total_changed_lines != plan.changed_lines:
+        basis = f"{basis}（总变更 {plan.total_changed_lines} 行）"
     return (
-        f"检测到大 PR：本次变更 {plan.changed_lines} 行（阈值 {plan.threshold} 行），"
+        f"检测到大 PR：本次{basis}，超过阈值 {plan.threshold} 行，"
         f"已改为逐文件检视{prefix} {len(plan.selected)} 个文件：{details}。"
     )
 
@@ -225,11 +236,20 @@ def _max_diff_chars() -> int:
         return 120000
 
 
+def _llm_timeout() -> httpx.Timeout:
+    return httpx.Timeout(120.0)
+
+
+def _new_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=_llm_timeout())
+
+
 async def _call_llm(
     data: PullRequestData,
     annotated_diff: str,
     model: str | None,
     focus_path: str | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -259,14 +279,22 @@ async def _call_llm(
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+    if client is not None:
+        return await _post_chat(client, url, headers, payload)
+    async with _new_client() as owned:
+        return await _post_chat(owned, url, headers, payload)
+
+
+async def _post_chat(
+    client: httpx.AsyncClient, url: str, headers: dict[str, str], payload: dict[str, Any]
+) -> dict[str, Any]:
+    response = await client.post(url, headers=headers, json=payload)
+    if response.status_code == 400:
+        payload["response_format"] = {"type": "json_object"}
         response = await client.post(url, headers=headers, json=payload)
-        if response.status_code == 400:
-            payload["response_format"] = {"type": "json_object"}
-            response = await client.post(url, headers=headers, json=payload)
-        if response.status_code >= 400:
-            body = response.text[:400].replace("\n", " ")
-            raise ReviewError(f"LLM 调用失败: HTTP {response.status_code} {body}")
+    if response.status_code >= 400:
+        body = response.text[:400].replace("\n", " ")
+        raise ReviewError(f"LLM 调用失败: HTTP {response.status_code} {body}")
 
     try:
         content = response.json()["choices"][0]["message"]["content"]

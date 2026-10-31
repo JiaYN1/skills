@@ -82,7 +82,9 @@ async def _drop_already_published(
     except (ProviderError, httpx.HTTPError):
         return list(comments), []
 
-    updated, duplicates, _ = mark_already_reported(comments, existing, include_similar=False)
+    updated, duplicates, _ = mark_already_reported(
+        comments, existing, include_similar=False, fallback_url=ref.web_url
+    )
     fresh = [comment for comment in updated if not comment.already_posted]
     return fresh, duplicates
 

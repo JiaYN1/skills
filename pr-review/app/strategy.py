@@ -78,6 +78,10 @@ CONFIG_DIR_PARTS = {
 }
 
 DOC_SUFFIXES = {".md", ".rst", ".txt", ".adoc", ".mdx"}
+DOC_NAMES = {
+    "readme", "changelog", "changes", "history", "license", "licence", "notice",
+    "contributing", "authors", "codeowners", "security", "support", "faq", "todo",
+}
 LOCK_NAMES = {
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
     "poetry.lock", "pipfile.lock", "composer.lock", "cargo.lock", "go.sum",
@@ -108,6 +112,7 @@ class ReviewPlan:
 
     large: bool
     changed_lines: int
+    total_changed_lines: int
     threshold: int
     file_limit: int
     selected: list[ChangedFile]
@@ -154,19 +159,29 @@ def count_changed_lines(files: list[ChangedFile]) -> int:
 
 
 def build_review_plan(files: list[ChangedFile]) -> ReviewPlan:
-    """Decide whether this PR is large and, if so, which files to review."""
+    """Decide whether this PR is large and, if so, which files to review.
+
+    The size test only counts lines that can actually be reviewed: a PR whose
+    bulk is tests, docs and lock files stays on the single-call path even when
+    its raw diff is big, because nothing would be dropped anyway.
+    """
 
     threshold = large_pr_threshold()
     limit = large_pr_file_limit()
+    classified = [(file, *_classify(file)) for file in files]
     total = count_changed_lines(files)
-    reviewable = [file for file in files if file.hunks]
+    reviewable_changed = sum(
+        changed_line_count(file) for file, tier, _ in classified if tier != TIER_EXCLUDED
+    )
 
-    if total <= threshold:
+    if reviewable_changed <= threshold:
+        reviewable = [file for file, _, _ in classified if file.hunks]
         tiers = {file.new_path: TIER_LABELS[TIER_BUSINESS] for file in reviewable}
         skipped = [(file.new_path, REASON_EMPTY) for file in files if not file.hunks]
         return ReviewPlan(
             large=False,
-            changed_lines=total,
+            changed_lines=reviewable_changed,
+            total_changed_lines=total,
             threshold=threshold,
             file_limit=limit,
             selected=reviewable,
@@ -177,11 +192,7 @@ def build_review_plan(files: list[ChangedFile]) -> ReviewPlan:
     ranked: list[tuple[int, int, str, ChangedFile]] = []
     tiers: dict[str, str] = {}
     skipped: list[tuple[str, str]] = []
-    for file in files:
-        tier, reason = _classify(file)
-        if not file.hunks:
-            skipped.append((file.new_path, REASON_EMPTY))
-            continue
+    for file, tier, reason in classified:
         if tier == TIER_EXCLUDED:
             skipped.append((file.new_path, reason))
             continue
@@ -203,7 +214,8 @@ def build_review_plan(files: list[ChangedFile]) -> ReviewPlan:
 
     return ReviewPlan(
         large=True,
-        changed_lines=total,
+        changed_lines=reviewable_changed,
+        total_changed_lines=total,
         threshold=threshold,
         file_limit=limit,
         selected=selected,
@@ -235,6 +247,7 @@ def _classify(file: ChangedFile) -> tuple[int, str]:
     name = parts[-1] if parts else normalized.lower()
     directories = parts[:-1]
     suffix = _suffix(name)
+    stem = name.rsplit(".", 1)[0] if "." in name else name
 
     if not file.hunks:
         return TIER_EXCLUDED, REASON_EMPTY
@@ -243,10 +256,14 @@ def _classify(file: ChangedFile) -> tuple[int, str]:
         return TIER_EXCLUDED, REASON_TEST
     if GENERATED_NAME_RE.search(name):
         return TIER_EXCLUDED, REASON_GENERATED
-    if suffix in DOC_SUFFIXES:
-        return TIER_EXCLUDED, REASON_DOC
     if name in LOCK_NAMES or suffix in LOCK_SUFFIXES:
         return TIER_EXCLUDED, REASON_LOCK
+    # requirements.txt / CMakeLists.txt 这类依赖与构建清单同样以 .txt 结尾，
+    # 必须先归到配置，否则会被下面的"文档"判断当成文档丢掉。
+    if _is_config_name(name):
+        return TIER_CONFIG, ""
+    if suffix in DOC_SUFFIXES or name in DOC_NAMES or stem in DOC_NAMES:
+        return TIER_EXCLUDED, REASON_DOC
     if any(part in GENERATED_DIR_PARTS for part in directories):
         return TIER_EXCLUDED, REASON_GENERATED
     if any(part in I18N_PARTS for part in directories) or suffix in {".po", ".pot", ".mo"}:
@@ -278,11 +295,19 @@ def _is_interface(name: str, suffix: str, directories: list[str]) -> bool:
 def _is_config(name: str, suffix: str, directories: list[str]) -> bool:
     if suffix in CONFIG_SUFFIXES:
         return True
-    if name in CONFIG_NAMES or name.startswith(".env"):
-        return True
-    if name.startswith("docker-compose") or name.startswith("requirements"):
+    if _is_config_name(name) or name.startswith(".env"):
         return True
     return any(part in CONFIG_DIR_PARTS for part in directories)
+
+
+def _is_config_name(name: str) -> bool:
+    """Dependency / build manifests, including the ``.txt`` ones."""
+
+    return (
+        name in CONFIG_NAMES
+        or name.startswith("docker-compose")
+        or name.startswith("requirements")
+    )
 
 
 def _suffix(name: str) -> str:

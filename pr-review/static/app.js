@@ -17,6 +17,7 @@ const commentsList = document.querySelector("#commentsList");
 const selectAll = document.querySelector("#selectAll");
 
 let currentComments = [];
+let busy = false;
 
 checkHealth();
 loadModels();
@@ -36,6 +37,13 @@ selectAll.addEventListener("change", () => {
     if (selectAll.checked && checkbox.dataset.duplicateSuspect) return;
     checkbox.checked = selectAll.checked;
   });
+  syncSelectionState();
+});
+
+commentsList.addEventListener("change", (event) => {
+  if (event.target.classList.contains("comment-select")) {
+    syncSelectionState();
+  }
 });
 
 async function checkHealth() {
@@ -183,9 +191,7 @@ function renderComments(comments) {
     commentsList.appendChild(card);
   });
 
-  publishButton.disabled = !comments.some((comment) => comment.publishable);
-  selectAll.disabled = publishButton.disabled;
-  selectAll.checked = true;
+  syncSelectionState();
 }
 
 function renderCommentHeader(comment) {
@@ -244,9 +250,13 @@ function renderCommentBody(comment) {
       : comment.publish_warning || "PR 上已存在相同意见，不再重复发布。";
   } else if (comment.duplicate_suspect) {
     state.classList.add("duplicate-suspect");
-    state.textContent = comment.existing_url
-      ? `疑似已提过：${comment.existing_url}（勾选后仍会发布）`
-      : `${comment.publish_warning || "PR 上可能存在相同意见。"}（勾选后仍会发布）`;
+    const detail = [];
+    if (Number.isFinite(comment.duplicate_score)) {
+      detail.push(`相似度 ${Math.round(comment.duplicate_score * 100)}%`);
+    }
+    if (comment.duplicate_hint) detail.push(comment.duplicate_hint);
+    const link = comment.existing_url ? ` ｜ 已有意见：${comment.existing_url}` : "";
+    state.textContent = `疑似已提过${detail.length ? `（${detail.join(" · ")}）` : ""}${link}（勾选后仍会发布）`;
   } else {
     state.textContent = comment.publishable ? "待发布" : comment.publish_warning || "不可发布";
   }
@@ -292,9 +302,20 @@ async function parseResponse(response) {
 }
 
 function setBusy(isBusy, text) {
+  busy = isBusy;
   reviewButton.disabled = isBusy;
-  publishButton.disabled = isBusy || !currentComments.some((comment) => comment.publishable);
   serviceState.textContent = isBusy ? text : serviceState.textContent;
+  syncSelectionState();
+}
+
+// 发布按钮与全选框只由"实际勾选了什么"决定，避免默认不勾选的疑似重复造成状态错乱
+function syncSelectionState() {
+  const boxes = Array.from(document.querySelectorAll(".comment-select:not(:disabled)"));
+  const checked = boxes.filter((checkbox) => checkbox.checked);
+  publishButton.disabled = busy || checked.length === 0;
+  selectAll.disabled = busy || boxes.length === 0;
+  selectAll.checked = boxes.length > 0 && checked.length === boxes.length;
+  selectAll.indeterminate = checked.length > 0 && checked.length < boxes.length;
 }
 
 function showError(message) {

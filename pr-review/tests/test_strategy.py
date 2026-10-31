@@ -36,7 +36,52 @@ class SmallPrTest(unittest.TestCase):
 
         self.assertFalse(plan.large)
         self.assertEqual(len(plan.selected), 2)
-        self.assertEqual(plan.changed_lines, 50)
+        self.assertEqual(plan.changed_lines, 20)  # 判定只看可检视行数
+        self.assertEqual(plan.total_changed_lines, 50)
+
+    def test_test_heavy_pr_stays_on_the_single_call_path(self):
+        files = parse_unified_diff(make_patch("src/core.py", 400) + make_patch("tests/test_core.py", 800))
+
+        plan = build_review_plan(files)
+
+        self.assertFalse(plan.large)
+        self.assertEqual(plan.changed_lines, 400)
+        self.assertEqual(plan.total_changed_lines, 1200)
+        self.assertEqual(len(plan.selected), 2)
+
+    def test_dependency_manifests_are_config_not_docs(self):
+        files = parse_unified_diff(
+            make_patch("requirements.txt", 600)
+            + make_patch("requirements-dev.txt", 10)
+            + make_patch("CMakeLists.txt", 300)
+        )
+
+        plan = build_review_plan(files)
+
+        self.assertTrue(plan.large)
+        self.assertEqual(
+            plan.selected_paths, ["requirements.txt", "CMakeLists.txt", "requirements-dev.txt"]
+        )
+        self.assertEqual(plan.selected_tiers["requirements.txt"], "配置/依赖")
+        self.assertEqual(plan.skipped, [])
+
+    def test_readme_and_license_are_docs(self):
+        files = parse_unified_diff(
+            make_patch("README.txt", 10)
+            + make_patch("LICENSE", 5)
+            + make_patch("CHANGELOG", 5)
+            + make_patch("notes.txt", 5)
+            + make_patch("src/core.py", 600)
+        )
+
+        plan = build_review_plan(files)
+        reasons = dict(plan.skipped)
+
+        self.assertEqual(reasons["README.txt"], "文档")
+        self.assertEqual(reasons["LICENSE"], "文档")
+        self.assertEqual(reasons["CHANGELOG"], "文档")
+        self.assertEqual(reasons["notes.txt"], "文档")
+        self.assertIn("src/core.py", plan.selected_paths)
 
     def test_changed_lines_count_additions_and_deletions(self):
         diff = (

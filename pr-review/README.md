@@ -90,7 +90,7 @@ curl --fail http://localhost:19986/api/health
 
 ## 大 PR 策略
 
-变更行数（新增 + 删除）超过 `LARGE_PR_DIFF_LINES`（默认 500）时，一次把整个 diff 交给模型会挤压上下文、丢掉后面的改动，因此改为**逐文件检视**：
+**可检视变更行数**（新增 + 删除，排除测试、文档、锁文件、生成代码与资源文件后）超过 `LARGE_PR_DIFF_LINES`（默认 500）时，一次把整个 diff 交给模型会挤压上下文、丢掉后面的改动，因此改为**逐文件检视**。只有测试/文档/锁文件的大 PR 仍走单次检视——它们本来就不占用检视名额。具体做法：
 
 1. 对每个变更文件分级：接口定义（`.h`/`.hpp`/`.proto`/`api`、`routes`、`controllers` 等）、配置与依赖（`*.yaml`/`*.toml`/`Dockerfile`/`requirements*.txt` 等）优先于普通业务代码；
 2. 测试、文档、锁文件、生成代码、第三方目录、资源与多语言文件不占用检视名额；
@@ -114,8 +114,10 @@ curl --fail http://localhost:19986/api/health
 
 - 正文"问题描述"与已有评论高度相似（相似度 ≥ `DUPLICATE_SIMILARITY_THRESHOLD`，默认 `0.7`）时标记 `duplicate_suspect=true`；
 - 这一档专门用来兜住**别人写的、或者 agent skill 流程写的**同类意见——它们既没有指纹，格式也不同（`【review】【类别】问题；修改建议：…`），只能靠正文比对；
-- 这类意见**保持可发布**，页面显示"疑似已提过：<原评论链接>（勾选后仍会发布）"，默认**不勾选**，用户确认后勾选即可照常发布；
+- 这类意见**保持可发布**，默认**不勾选**，用户确认后勾选即可照常发布；
+- 页面上会给出判断依据：相似度百分比、提出者、行号与正文摘要（`duplicate_hint`），平台不提供评论链接时回退到 PR 页面；
 - 文件名已知但两边不同的意见不会算作疑似重复；正文过短（< 12 字，如 `compile`、`ci_pipeline`）的噪声评论不参与比对。
+- 比对前会剔除明显的机器人播报（`文档门禁`、`pipeline is running`、`CI 流水线` 卡片、`compile`/`ci_pipeline` 状态回复等），既省时间也少误判；带 `【review】` 或指纹的意见不受作者影响，始终参与比对。
 
 同一次生成内部重复的意见也会去掉。读取已有评论失败（例如缺少权限）时不会中断 review，只会在 `warnings` 里提示"本次不做重复校验"。
 
@@ -160,7 +162,7 @@ curl --fail http://localhost:19986/api/health
 
 `scm_token` 和 `model` 可省略或传 `null`，分别使用服务端平台 token 和默认模型。
 
-返回 `pr`（PR 信息）、`comments`（意见列表）、`summary`（数量统计和摘要）及 `warnings`（处理提示）。每条意见包含 `id`、`file_path`、`line`、`category`、`severity`、`message`、`suggestion`、`code_example`、`language`、`body`、`publishable`、`publish_warning`、`already_posted`、`existing_url`、`duplicate_suspect` 和 `duplicate_score`。严重程度为「严重」「建议」「规范」；只有 `publishable=true` 的意见可以被选中发布，其中 `already_posted=true` 表示该意见已确定存在于 PR/MR 上、不会重复发布，`duplicate_suspect=true` 表示疑似重复（前端默认不勾选，用户可自行勾选发布）。
+返回 `pr`（PR 信息）、`comments`（意见列表）、`summary`（数量统计和摘要）及 `warnings`（处理提示）。每条意见包含 `id`、`file_path`、`line`、`category`、`severity`、`message`、`suggestion`、`code_example`、`language`、`body`、`publishable`、`publish_warning`、`already_posted`、`existing_url`、`duplicate_suspect`、`duplicate_score` 和 `duplicate_hint`。严重程度为「严重」「建议」「规范」；只有 `publishable=true` 的意见可以被选中发布，其中 `already_posted=true` 表示该意见已确定存在于 PR/MR 上、不会重复发布，`duplicate_suspect=true` 表示疑似重复（前端默认不勾选，用户可自行勾选发布）。
 
 ### `POST /api/publish`
 

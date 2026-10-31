@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+import app.dedupe as dedupe_module
 from app.dedupe import (
     DUPLICATE_WARNING,
     SIMILAR_WARNING,
@@ -9,10 +10,12 @@ from app.dedupe import (
     comment_fingerprint,
     comment_fingerprint_of,
     deduplicate_within_batch,
+    duplicate_hint,
     existing_fingerprints,
     fingerprint_marker,
     find_similar_comment,
     mark_already_reported,
+    prepare_subjects,
     subject_similarity,
     with_fingerprint_marker,
 )
@@ -286,6 +289,152 @@ class SimilarSuspectTest(unittest.TestCase):
             _, _, suspects = mark_already_reported([comment], existing)
 
         self.assertEqual(len(suspects), 1)
+
+
+class DuplicateHintTest(unittest.TestCase):
+    def test_hint_contains_author_location_and_excerpt(self):
+        source = ExistingComment(
+            id="1", file_path="src/a.py", line=417,
+            body="【review】【逻辑缺陷】" + "很长的说明文字" * 20, author="jia_ya_nan",
+        )
+
+        hint = duplicate_hint(source)
+
+        self.assertIn("jia_ya_nan", hint)
+        self.assertIn("src/a.py 第 417 行", hint)
+        self.assertIn("…", hint)
+        self.assertLess(len(hint), 200)
+
+    def test_hint_degrades_without_author_or_line(self):
+        hint = duplicate_hint(ExistingComment(id="1", file_path="", line=None, body="【review】某个问题描述"))
+
+        self.assertEqual(hint, "某个问题描述")
+
+    def test_fallback_url_is_used_when_the_platform_has_no_permalink(self):
+        message = "AFD 分解发生在 maybe_reuse_layers 之后，启用默认层复用时后续遍历只能看到代表层。"
+        comment = make_comment(message=message)
+        existing = [
+            ExistingComment(id="1", file_path="", line=417, body=f"【review】【逻辑缺陷】【高】{message}", author="jia_ya_nan")
+        ]
+        fallback = "https://gitcode.com/Ascend/msmodeling/pull/946"
+
+        updated, _, suspects = mark_already_reported([comment], existing, fallback_url=fallback)
+
+        self.assertEqual(len(suspects), 1)
+        self.assertEqual(updated[0].existing_url, fallback)
+        self.assertIn("jia_ya_nan", updated[0].duplicate_hint or "")
+        self.assertIn("第 417 行", updated[0].duplicate_hint or "")
+
+    def test_permalink_wins_over_the_fallback(self):
+        comment = make_comment()
+        existing = [
+            ExistingComment(
+                id="1", file_path="app/service.py", line=999, body=posted_body(comment),
+                url="https://example/pr#discussion_r1",
+            )
+        ]
+
+        updated, _, _ = mark_already_reported([comment], existing, fallback_url="https://example/pr")
+
+        self.assertEqual(updated[0].existing_url, "https://example/pr#discussion_r1")
+
+
+class PreparedSubjectsTest(unittest.TestCase):
+    def test_subjects_are_parsed_once_per_review_not_per_comment(self):
+        comments = [make_comment(message=f"第 {index} 个问题：循环里重复写入记录，导致数据重复。") for index in range(3)]
+        existing = [
+            ExistingComment(id=str(index), file_path="app/service.py", line=10,
+                            body=f"【review】【逻辑】第 {index} 处会重复写入记录，需要先去重处理。")
+            for index in range(5)
+        ]
+
+        calls = 0
+        original = dedupe_module.body_subject
+
+        def counting(body):
+            nonlocal calls
+            calls += 1
+            return original(body)
+
+        with patch("app.dedupe.body_subject", new=counting):
+            mark_already_reported(comments, existing)
+
+        self.assertLessEqual(calls, len(existing))
+
+    def test_hopeless_pairs_never_reach_the_expensive_matcher(self):
+        comment = make_comment(message="这里会重复写入记录，导致导入的数据出现重复。")
+        existing = [
+            ExistingComment(
+                id="1", file_path="app/service.py", line=10,
+                body="【review】【逻辑】" + "完全不相干的一长段描述，反复描述别的事情，" * 12,
+            )
+        ]
+
+        compared = 0
+        original = dedupe_module._prepared_similarity
+
+        def counting(first, second):
+            nonlocal compared
+            compared += 1
+            return original(first, second)
+
+        with patch("app.dedupe._prepared_similarity", new=counting):
+            _, _, suspects = mark_already_reported([comment], existing)
+
+        self.assertEqual(suspects, [])
+        self.assertEqual(compared, 0)
+
+    def test_length_prefilter_keeps_containment_matches(self):
+        message = "这里会重复写入记录，需要先去重处理。"
+        comment = make_comment(message=message)
+        existing = [
+            ExistingComment(
+                id="1", file_path="app/service.py", line=10,
+                body="【review】【逻辑】" + "前置说明。" * 40 + message + "后续说明。" * 40,
+            )
+        ]
+
+        updated, _, suspects = mark_already_reported([comment], existing)
+
+        self.assertEqual(len(suspects), 1)
+        self.assertEqual(updated[0].duplicate_score, 1.0)
+
+
+class NoiseFilterTest(unittest.TestCase):
+    def test_ci_chatter_is_skipped_before_comparison(self):
+        message = "这里会重复写入记录，需要先去重处理。"
+        comment = make_comment(message=message)
+        existing = [
+            ExistingComment(id="1", file_path="", line=None,
+                            body="ascend docs pipeline is running, 这里会重复写入记录，需要先去重处理。")
+        ]
+
+        _, _, suspects = mark_already_reported([comment], existing)
+
+        self.assertEqual(suspects, [])
+
+    def test_review_body_from_a_bot_is_still_compared(self):
+        message = "这里会重复写入记录，需要先去重处理。"
+        comment = make_comment(message=message)
+        existing = [
+            ExistingComment(id="1", file_path="", line=9, author="ascend-robot",
+                            body=f"【review】【逻辑缺陷】【高】{message}；修改建议：先去重。")
+        ]
+
+        _, _, suspects = mark_already_reported([comment], existing)
+
+        self.assertEqual(len(suspects), 1)
+
+    def test_prepare_subjects_drops_noise_and_short_bodies(self):
+        existing = [
+            ExistingComment(id="1", file_path="", line=None, body="compile"),
+            ExistingComment(id="2", file_path="", line=None, body="| 检查项 | 结果 |\n| --- | --- |\n| 文档门禁 | 通过 |"),
+            ExistingComment(id="3", file_path="", line=None, body="【review】这里会重复写入记录，需要先去重处理。"),
+        ]
+
+        prepared = prepare_subjects(existing)
+
+        self.assertEqual([comment.id for comment, _ in prepared], ["3"])
 
 
 class WithinBatchDedupTest(unittest.TestCase):

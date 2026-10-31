@@ -201,6 +201,16 @@ class ReviewBodyTest(unittest.TestCase):
         self.assertIn(fingerprint_marker(fingerprint), body)
 
 
+class _StubClient:
+    """Stands in for httpx.AsyncClient: the LLM call itself is always faked."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
 class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         diff = "".join(
@@ -216,6 +226,10 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         )
         self.files = parse_unified_diff(diff)
         self.data = PullRequestData(ref=make_ref(), title="large", files=self.files, diff=diff)
+        # 真实 AsyncClient 建一次 SSL 上下文要 0.3 秒，测试里不需要。
+        client_patcher = patch("app.reviewer._new_client", new=_StubClient)
+        client_patcher.start()
+        self.addCleanup(client_patcher.stop)
 
     def _llm_reply(self, focus_path: str) -> dict:
         target = next(file for file in self.files if file.new_path == focus_path)
@@ -225,7 +239,7 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
     async def test_selected_files_are_reviewed_one_call_each(self):
         calls: list[tuple[str | None, str]] = []
 
-        async def fake_call(data, annotated_diff, model=None, focus_path=None):
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
             calls.append((focus_path, annotated_diff))
             return self._llm_reply(focus_path)
 
@@ -246,8 +260,27 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tests/test_core.py", plan.selected_paths)
         self.assertTrue(any("检测到大 PR" in warning for warning in warnings))
 
+    async def test_one_http_client_is_shared_by_every_file(self):
+        created: list[int] = []
+
+        def counting_client():
+            created.append(1)
+            return _StubClient()
+
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
+            assert isinstance(client, _StubClient)
+            return self._llm_reply(focus_path)
+
+        with patch("app.reviewer._call_llm", new=fake_call), patch(
+            "app.reviewer._new_client", new=counting_client
+        ):
+            comments, _, _ = await generate_review(self.data)
+
+        self.assertEqual(len(comments), len(build_review_plan(self.files).selected))
+        self.assertEqual(len(created), 1)
+
     async def test_anchors_stay_unique_across_per_file_rendering(self):
-        async def fake_call(data, annotated_diff, model=None, focus_path=None):
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
             return self._llm_reply(focus_path)
 
         with patch("app.reviewer._call_llm", new=fake_call):
@@ -257,7 +290,7 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(anchors), len(set(anchors)))
 
     async def test_one_failed_file_does_not_break_the_others(self):
-        async def fake_call(data, annotated_diff, model=None, focus_path=None):
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
             if focus_path == "src/core.py":
                 raise ReviewError("模拟上游失败")
             return self._llm_reply(focus_path)
@@ -270,7 +303,7 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("src/core.py 审查失败" in warning for warning in warnings))
 
     async def test_repeated_findings_in_one_run_are_removed(self):
-        async def fake_call(data, annotated_diff, model=None, focus_path=None):
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
             reply = self._llm_reply(focus_path)
             return {"comments": [*reply["comments"], *reply["comments"]]}
 
@@ -281,7 +314,7 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({comment.file_path for comment in comments}), 6)
 
     async def test_already_posted_comments_are_flagged(self):
-        async def fake_call(data, annotated_diff, model=None, focus_path=None):
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
             return self._llm_reply(focus_path)
 
         existing = [
@@ -304,7 +337,7 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("已存在于该 PR/MR" in warning for warning in warnings))
 
     async def test_similar_existing_comments_are_marked_for_confirmation(self):
-        async def fake_call(data, annotated_diff, model=None, focus_path=None):
+        async def fake_call(data, annotated_diff, model=None, focus_path=None, client=None):
             return self._llm_reply(focus_path)
 
         existing = [
@@ -323,6 +356,9 @@ class LargePrReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(suspects), len(comments))
         self.assertTrue(all(comment.publishable for comment in suspects))
         self.assertTrue(all(not comment.already_posted for comment in suspects))
+        # 平台不给评论链接时回退到 PR 页面，并给出判断依据
+        self.assertEqual(suspects[0].existing_url, self.data.ref.web_url)
+        self.assertIn("第 417 行", suspects[0].duplicate_hint or "")
         self.assertTrue(any("待确认" in warning for warning in warnings))
 
     def test_user_prompt_scopes_large_pr_call_to_one_file(self):

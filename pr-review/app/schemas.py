@@ -36,6 +36,7 @@ class ReviewComment(BaseModel):
     existing_url: str | None = None
     duplicate_suspect: bool = False
     duplicate_score: float | None = None
+    duplicate_hint: str | None = None
 
 
 class ReviewSummary(BaseModel):
